@@ -1,0 +1,426 @@
+#!/usr/bin/env python
+
+# Copyright 2026 The HuggingFace Inc. team. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from __future__ import annotations
+
+import json
+import logging
+import sys
+import time
+from collections import deque
+from dataclasses import dataclass, field, replace
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import torch
+
+from lerobot.adapters.openpi_jax import OpenPIJaxAdapter, OpenPIJaxClientConfig
+from lerobot.adapters.openpi_jax.client import WebsocketOpenPIJaxClient
+from lerobot.configs import parser
+from lerobot.envs.configs import LiberoEnv
+from lerobot.envs.factory import make_env
+from lerobot.envs.utils import add_envs_task, preprocess_observation
+from lerobot.processor.env_processor import LiberoProcessorStep
+from lerobot.processor.pipeline import PolicyProcessorPipeline
+from lerobot.runtime.contracts import (
+    ActionCommand,
+    EpisodeTrace,
+    ObservationPacket,
+    PolicyRequest,
+    RobotSpec,
+    RuntimeSpec,
+    TaskSpec,
+)
+from lerobot.runtime.trace import write_episode_trace
+from lerobot.runtime.variation import VariationConfig, build_variation_profile
+from lerobot.utils.constants import OBS_IMAGES, OBS_STATE
+from lerobot.utils.import_utils import register_third_party_plugins
+from lerobot.utils.random_utils import set_seed
+from lerobot.utils.utils import init_logging
+
+LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class BowlTaskResolverConfig:
+    task_suite: str = "libero_object"
+    name_contains: str = "bowl"
+
+
+@dataclass(slots=True)
+class SmokeRuntimeConfig:
+    n_episodes: int = 3
+    max_steps: int = 300
+    seed: int = 123
+    write_trace: bool = True
+    output_dir: str = "outputs/openpi_bowl_smoke"
+    fail_fast: bool = True
+
+
+@dataclass(slots=True)
+class OpenPIBowlSmokeConfig:
+    policy: OpenPIJaxClientConfig = field(default_factory=OpenPIJaxClientConfig)
+    env: LiberoEnv = field(
+        default_factory=lambda: LiberoEnv(
+            task="libero_object",
+            task_ids=None,
+            obs_type="pixels_agent_pos",
+            camera_name="agentview_image,robot0_eye_in_hand_image",
+            init_states=True,
+            autoreset_on_done=False,
+        )
+    )
+    bowl_task_resolver: BowlTaskResolverConfig = field(default_factory=BowlTaskResolverConfig)
+    variation: VariationConfig = field(default_factory=VariationConfig)
+    runtime: SmokeRuntimeConfig = field(default_factory=SmokeRuntimeConfig)
+
+
+def _rewrite_legacy_config_flag() -> None:
+    for index, arg in enumerate(sys.argv[1:], start=1):
+        if arg.startswith("--config="):
+            sys.argv[index] = "--config_path=" + arg[len("--config=") :]
+
+
+def _to_numpy_unbatched(value: Any) -> np.ndarray:
+    if isinstance(value, torch.Tensor):
+        array = value.detach().cpu().numpy()
+    else:
+        array = np.asarray(value)
+    if array.ndim > 0 and array.shape[0] == 1:
+        array = array[0]
+    return array
+
+
+def _to_uint8_hwc_image(value: Any) -> np.ndarray:
+    array = _to_numpy_unbatched(value)
+    if array.ndim != 3:
+        raise ValueError(f"Expected image tensor with 3 dims after unbatching, got {array.shape}.")
+    if array.shape[0] in (1, 3, 4) and array.shape[0] < array.shape[-1]:
+        array = np.moveaxis(array, 0, -1)
+    if array.dtype.kind == "f":
+        array = np.clip(np.rint(array * 255.0), 0, 255).astype(np.uint8)
+    else:
+        array = array.astype(np.uint8, copy=False)
+    return np.ascontiguousarray(array)
+
+
+def _to_scalar_or_dict(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _to_scalar_or_dict(item) for key, item in value.items()}
+    if isinstance(value, np.ndarray):
+        if value.ndim == 0:
+            return value.item()
+        if value.shape[0] == 1:
+            return _to_scalar_or_dict(value[0])
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, (list, tuple)) and len(value) == 1:
+        return _to_scalar_or_dict(value[0])
+    return value
+
+
+def _extract_success(info: dict[str, Any]) -> bool:
+    normalized = _to_scalar_or_dict(info)
+    if not isinstance(normalized, dict):
+        return False
+    final_info = normalized.get("final_info")
+    if isinstance(final_info, dict) and "is_success" in final_info:
+        return bool(final_info["is_success"])
+    if "is_success" in normalized:
+        return bool(normalized["is_success"])
+    return False
+
+
+def resolve_bowl_task_config(
+    env_cfg: LiberoEnv, resolver_cfg: BowlTaskResolverConfig
+) -> tuple[LiberoEnv, str | None, str | None]:
+    if env_cfg.task_ids is not None:
+        if len(env_cfg.task_ids) != 1:
+            raise ValueError("OpenPI bowl smoke requires exactly one resolved LIBERO task_id.")
+        return env_cfg, None, None
+
+    try:
+        from libero.libero import benchmark
+    except ImportError as exc:
+        raise ImportError(
+            "LIBERO is required to resolve bowl tasks dynamically. "
+            "Install the `lerobot[libero]` extra or pass env.task_ids explicitly."
+        ) from exc
+
+    suite_name = resolver_cfg.task_suite or env_cfg.task
+    benchmark_dict = benchmark.get_benchmark_dict()
+    if suite_name not in benchmark_dict:
+        raise ValueError(f"Unknown LIBERO suite '{suite_name}'.")
+
+    suite = benchmark_dict[suite_name]()
+    needle = resolver_cfg.name_contains.lower().strip()
+    for task_id, task in enumerate(suite.tasks):
+        task_name = getattr(task, "name", "")
+        task_prompt = getattr(task, "language", "")
+        if needle in task_name.lower() or needle in task_prompt.lower():
+            return replace(env_cfg, task=suite_name, task_ids=[task_id]), task_name, task_prompt
+
+    raise ValueError(f"Could not resolve a bowl task in suite '{suite_name}' with token '{needle}'.")
+
+
+def make_single_task_vec_env(env_cfg: LiberoEnv):
+    envs = make_env(env_cfg, n_envs=1, use_async_envs=False)
+    if len(envs) != 1:
+        raise ValueError(f"Expected exactly one suite, got suites={list(envs.keys())}.")
+    suite_name = next(iter(envs))
+    task_map = envs[suite_name]
+    if len(task_map) != 1:
+        raise ValueError(f"Expected exactly one task, got task_ids={list(task_map.keys())}.")
+    task_id = next(iter(task_map))
+    return suite_name, task_id, task_map[task_id]
+
+
+def make_smoke_env_preprocessor(env_cfg: LiberoEnv) -> PolicyProcessorPipeline[dict[str, Any], dict[str, Any]]:
+    if env_cfg.type != "libero":
+        raise ValueError(f"OpenPI bowl smoke only supports LIBERO, got env type '{env_cfg.type}'.")
+    return PolicyProcessorPipeline(steps=[LiberoProcessorStep()])
+
+
+def processed_observation_to_packet(
+    processed_observation: dict[str, Any],
+    *,
+    suite_name: str,
+    task_id: int,
+    episode_index: int,
+    step_id: int,
+    task_text: str,
+    prev_action: np.ndarray | None = None,
+) -> ObservationPacket:
+    state = np.asarray(_to_numpy_unbatched(processed_observation[OBS_STATE]), dtype=np.float32).reshape(-1)
+    third_person = _to_uint8_hwc_image(processed_observation[f"{OBS_IMAGES}.image"])
+    wrist = _to_uint8_hwc_image(processed_observation[f"{OBS_IMAGES}.image2"])
+    return ObservationPacket(
+        timestamp=time.time(),
+        episode_id=f"{suite_name}:{task_id}:episode_{episode_index}",
+        step_id=step_id,
+        images={
+            "third_person": third_person,
+            "left_wrist": wrist,
+        },
+        robot_state={"libero_state_8d": state},
+        task_text=task_text,
+        task_id=str(task_id),
+        robot_id="franka_panda",
+        embodiment_id="libero",
+        backend_id="mujoco",
+        prev_action=prev_action,
+    )
+
+
+def run_smoke_episode(
+    vec_env: Any,
+    adapter: Any,
+    env_preprocessor: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]],
+    runtime_cfg: SmokeRuntimeConfig,
+    *,
+    suite_name: str,
+    task_id: int,
+    episode_index: int,
+    task_name: str | None = None,
+    task_prompt: str | None = None,
+    control_dt: float = 1 / 30,
+) -> EpisodeTrace:
+    adapter.reset()
+    seed = runtime_cfg.seed + episode_index
+    observation, _info = vec_env.reset(seed=seed)
+    current_task_prompt = task_prompt or getattr(vec_env.envs[0], "task_description", "") or ""
+    current_task_name = task_name or getattr(vec_env.envs[0], "task", "") or ""
+    variation = dict(getattr(vec_env.envs[0], "last_variation_sample", {}))
+
+    trace = EpisodeTrace(
+        metadata={
+            "suite": suite_name,
+            "task_id": task_id,
+            "task_name": current_task_name,
+            "task_prompt": current_task_prompt,
+            "variation": variation,
+            "action_chunk_shapes": [],
+        }
+    )
+
+    robot_spec = RobotSpec(
+        robot_id="franka_panda",
+        action_dim=7,
+        camera_keys=("third_person", "left_wrist"),
+    )
+    task_spec = TaskSpec(task_suite=suite_name, task_id=str(task_id), prompt=current_task_prompt)
+    runtime_spec = RuntimeSpec(control_dt=control_dt, max_steps=runtime_cfg.max_steps)
+
+    pending_actions: deque[np.ndarray] = deque()
+    prev_action: np.ndarray | None = None
+    latencies_ms: list[float] = []
+    policy_calls = 0
+    episode_return = 0.0
+
+    for step_id in range(runtime_cfg.max_steps):
+        policy_observation = preprocess_observation(observation)
+        policy_observation = add_envs_task(vec_env, policy_observation)
+        policy_observation = env_preprocessor(policy_observation)
+        packet = processed_observation_to_packet(
+            policy_observation,
+            suite_name=suite_name,
+            task_id=task_id,
+            episode_index=episode_index,
+            step_id=step_id,
+            task_text=current_task_prompt,
+            prev_action=prev_action,
+        )
+        trace.observations.append(packet)
+
+        if not pending_actions:
+            request = PolicyRequest(
+                observation=packet,
+                robot_spec=robot_spec,
+                task_spec=task_spec,
+                runtime_spec=runtime_spec,
+            )
+            response = adapter.infer(request)
+            chunk = np.asarray(response.action.values, dtype=np.float32)
+            for chunk_action in chunk:
+                pending_actions.append(np.asarray(chunk_action, dtype=np.float32))
+            latencies_ms.append(float(response.latency_ms))
+            trace.actions.append(response.action)
+            trace.metadata["action_chunk_shapes"].append(list(chunk.shape))
+            policy_calls += 1
+
+        action = pending_actions.popleft()
+        prev_action = action.copy()
+        observation, reward, terminated, truncated, info = vec_env.step(action.reshape(1, -1))
+        reward_value = float(np.asarray(reward, dtype=np.float32).reshape(-1)[0])
+        done = bool(np.asarray(terminated | truncated).reshape(-1)[0])
+
+        episode_return += reward_value
+        trace.rewards.append(reward_value)
+        trace.dones.append(done)
+        trace.infos.append(_to_scalar_or_dict(info))
+
+        if done:
+            trace.success = _extract_success(info)
+            break
+    else:
+        trace.success = False
+
+    trace.metrics = {
+        "steps": float(len(trace.rewards)),
+        "episode_return": episode_return,
+        "policy_calls": float(policy_calls),
+        "avg_latency_ms": float(np.mean(latencies_ms)) if latencies_ms else 0.0,
+        "max_latency_ms": float(np.max(latencies_ms)) if latencies_ms else 0.0,
+    }
+    return trace
+
+
+def run_bowl_smoke(cfg: OpenPIBowlSmokeConfig) -> dict[str, Any]:
+    set_seed(cfg.runtime.seed)
+    resolved_env_cfg, resolved_task_name, resolved_task_prompt = resolve_bowl_task_config(
+        cfg.env, cfg.bowl_task_resolver
+    )
+    suite_name, task_id, vec_env = make_single_task_vec_env(resolved_env_cfg)
+    env_preprocessor = make_smoke_env_preprocessor(resolved_env_cfg)
+    variation_profile = build_variation_profile(cfg.variation)
+    output_dir = Path(cfg.runtime.output_dir)
+    traces_dir = output_dir / "traces"
+    adapter = OpenPIJaxAdapter(WebsocketOpenPIJaxClient(cfg.policy))
+
+    episode_summaries: list[dict[str, Any]] = []
+    try:
+        for episode_index in range(cfg.runtime.n_episodes):
+            if variation_profile is not None and hasattr(vec_env.envs[0], "set_variation_profile"):
+                vec_env.envs[0].set_variation_profile(variation_profile, seed=cfg.variation.seed + episode_index)
+
+            try:
+                trace = run_smoke_episode(
+                    vec_env,
+                    adapter,
+                    env_preprocessor,
+                    cfg.runtime,
+                    suite_name=suite_name,
+                    task_id=task_id,
+                    episode_index=episode_index,
+                    task_name=resolved_task_name,
+                    task_prompt=resolved_task_prompt,
+                    control_dt=1.0 / float(resolved_env_cfg.fps),
+                )
+            except Exception as exc:  # noqa: BLE001
+                if cfg.runtime.fail_fast:
+                    raise
+                trace = EpisodeTrace(
+                    success=False,
+                    metadata={
+                        "suite": suite_name,
+                        "task_id": task_id,
+                        "task_name": resolved_task_name,
+                        "task_prompt": resolved_task_prompt,
+                        "exception": repr(exc),
+                    },
+                )
+
+            trace_path = None
+            if cfg.runtime.write_trace:
+                trace_path = write_episode_trace(trace, traces_dir, episode_index)
+
+            episode_summaries.append(
+                {
+                    "episode_index": episode_index,
+                    "success": trace.success,
+                    "metrics": dict(trace.metrics),
+                    "trace_path": str(trace_path) if trace_path is not None else None,
+                    "variation": trace.metadata.get("variation", {}),
+                    "exception": trace.metadata.get("exception"),
+                }
+            )
+
+        success_rate = sum(1 for item in episode_summaries if item["success"]) / max(len(episode_summaries), 1)
+        summary = {
+            "suite": suite_name,
+            "task_id": task_id,
+            "task_name": resolved_task_name,
+            "task_prompt": resolved_task_prompt,
+            "episodes": episode_summaries,
+            "success_rate": success_rate,
+            "output_dir": str(output_dir),
+        }
+        output_dir.mkdir(parents=True, exist_ok=True)
+        with (output_dir / "summary.json").open("w", encoding="utf-8") as handle:
+            json.dump(summary, handle, indent=2)
+        LOGGER.info("OpenPI bowl smoke complete. success_rate=%.2f", success_rate)
+        return summary
+    finally:
+        adapter.close()
+        vec_env.close()
+
+
+@parser.wrap()
+def smoke_main(cfg: OpenPIBowlSmokeConfig) -> dict[str, Any]:
+    return run_bowl_smoke(cfg)
+
+
+def main() -> None:
+    _rewrite_legacy_config_flag()
+    init_logging()
+    register_third_party_plugins()
+    smoke_main()
+
+
+if __name__ == "__main__":
+    main()

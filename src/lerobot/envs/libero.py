@@ -116,6 +116,7 @@ class LiberoEnv(gym.Env):
         camera_name_mapping: dict[str, str] | None = None,
         num_steps_wait: int = 10,
         control_mode: str = "relative",
+        autoreset_on_done: bool = True,
     ):
         super().__init__()
         self.task_id = task_id
@@ -144,6 +145,7 @@ class LiberoEnv(gym.Env):
         self.num_steps_wait = num_steps_wait
         self.episode_index = episode_index
         self.episode_length = episode_length
+        self.autoreset_on_done = autoreset_on_done
         # Load once and keep
         self._init_states = get_task_init_states(task_suite, self.task_id) if self.init_states else None
         self._reset_stride = n_envs  # when performing a reset, append `_reset_stride` to `init_state_id`.
@@ -151,6 +153,9 @@ class LiberoEnv(gym.Env):
         self.init_state_id = self.episode_index  # tie each sub-env to a fixed init state
 
         self._env = self._make_envs_task(task_suite, self.task_id)
+        self._variation_profile = None
+        self._variation_rng = np.random.default_rng()
+        self.last_variation_sample: dict[str, float] = {}
         default_steps = 500
         self._max_episode_steps = (
             TASK_SUITE_MAX_STEPS.get(task_suite_name, default_steps)
@@ -293,6 +298,23 @@ class LiberoEnv(gym.Env):
             "Please switch to an image-based obs_type (e.g. 'pixels', 'pixels_agent_pos')."
         )
 
+    def set_variation_profile(self, profile, seed: int | None = None) -> None:
+        self._variation_profile = profile
+        if seed is not None:
+            self._variation_rng = np.random.default_rng(seed)
+
+    def clear_variation_profile(self) -> None:
+        self._variation_profile = None
+        self.last_variation_sample = {}
+
+    def _apply_variation_if_needed(self) -> None:
+        if self._variation_profile is None:
+            self.last_variation_sample = {}
+            return
+        sampled = self._variation_profile.sample_all(self._variation_rng)
+        self._variation_profile.apply_all(self, sampled)
+        self.last_variation_sample = dict(sampled)
+
     def reset(self, seed=None, **kwargs):
         super().reset(seed=seed)
         self._env.seed(seed)
@@ -300,6 +322,7 @@ class LiberoEnv(gym.Env):
         if self.init_states and self._init_states is not None:
             raw_obs = self._env.set_init_state(self._init_states[self.init_state_id % len(self._init_states)])
             self.init_state_id += self._reset_stride  # Change init_state_id when reset
+        self._apply_variation_if_needed()
 
         # After reset, objects may be unstable (slightly floating, intersecting, etc.).
         # Step the simulator with a no-op action for a few frames so everything settles.
@@ -316,7 +339,7 @@ class LiberoEnv(gym.Env):
         else:
             raise ValueError(f"Invalid control mode: {self.control_mode}")
         observation = self._format_raw_obs(raw_obs)
-        info = {"is_success": False}
+        info = {"is_success": False, "variation": dict(self.last_variation_sample)}
         return observation, info
 
     def step(self, action: np.ndarray) -> tuple[RobotObservation, float, bool, bool, dict[str, Any]]:
@@ -335,6 +358,7 @@ class LiberoEnv(gym.Env):
                 "task_id": self.task_id,
                 "done": done,
                 "is_success": is_success,
+                "variation": dict(self.last_variation_sample),
             }
         )
         observation = self._format_raw_obs(raw_obs)
@@ -344,8 +368,10 @@ class LiberoEnv(gym.Env):
                 "task_id": self.task_id,
                 "done": bool(done),
                 "is_success": bool(is_success),
+                "variation": dict(self.last_variation_sample),
             }
-            self.reset()
+            if self.autoreset_on_done:
+                self.reset()
         truncated = False
         return observation, reward, terminated, truncated, info
 

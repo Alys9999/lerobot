@@ -18,11 +18,11 @@ variation:
     object_friction:
       enabled: true
       target: bowl
-      range: [0.375, 0.375]
+      range: [0.38, 0.38]
     finger_friction:
       enabled: true
       target: gripper_fingers
-      range: [0.36, 0.36]
+      range: [0.38, 0.38]
     object_weight:
       enabled: true
       target: bowl
@@ -30,7 +30,7 @@ variation:
 
 runtime:
   n_episodes: 1
-  max_steps: 1200
+  max_steps: 400
   write_trace: true
   write_video: true
   output_dir: outputs/openpi_bowl_smoke

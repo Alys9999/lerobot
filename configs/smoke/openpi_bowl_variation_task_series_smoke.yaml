@@ -1,0 +1,37 @@
+policy:
+  transport: websocket
+  endpoint: ws://127.0.0.1:8000
+  timeout_s: 10.0
+
+env:
+  task: libero_spatial
+  task_ids: [0, 1, 2]
+  obs_type: pixels_agent_pos
+  camera_name: agentview_image,robot0_eye_in_hand_image
+  init_states: true
+  autoreset_on_done: false
+
+variation:
+  enabled: true
+  seed: 123
+  variables:
+    object_friction:
+      enabled: true
+      target: bowl
+      range: [0.38, 0.38]
+    finger_friction:
+      enabled: true
+      target: gripper_fingers
+      range: [0.38, 0.38]
+    object_weight:
+      enabled: true
+      target: bowl
+      range: [0.05, 0.4]
+
+runtime:
+  n_episodes: 1
+  max_steps: 400
+  write_trace: true
+  write_video: false
+  output_dir: outputs/openpi_bowl_task_series_smoke
+  fail_fast: true

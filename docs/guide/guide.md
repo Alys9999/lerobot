@@ -92,6 +92,25 @@ uv run lerobot-openpi-bowl-smoke \
   --runtime.write_video false
 ```
 
+## 4.1 Run a Task Series with Variation
+
+To run the same variation-enabled smoke flow across a series of bowl tasks, use the checked-in multi-task config:
+
+```bash
+cd /workspace/lerobot
+uv run lerobot-openpi-bowl-smoke \
+  --config_path /workspace/lerobot/configs/smoke/openpi_bowl_variation_task_series_smoke.yaml \
+  --policy.request_timeout_s 120
+```
+
+This config currently runs:
+
+- `libero_spatial` task `0`
+- `libero_spatial` task `1`
+- `libero_spatial` task `2`
+
+and applies the same variation profile independently to each task episode.
+
 ## 5. Outputs
 
 The smoke run writes outputs under:

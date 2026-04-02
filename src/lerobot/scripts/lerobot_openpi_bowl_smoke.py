@@ -62,6 +62,7 @@ LOGGER = logging.getLogger(__name__)
 class BowlTaskResolverConfig:
     task_suite: str = "libero_object"
     name_contains: str = "bowl"
+    max_matches: int | None = 1
 
 
 @dataclass(slots=True)
@@ -98,6 +99,15 @@ class OpenPIBowlSmokeConfig:
 class SmokeEpisodeArtifacts:
     trace: EpisodeTrace
     video_frames: list[np.ndarray] = field(default_factory=list)
+
+
+@dataclass(slots=True, frozen=True)
+class ResolvedSmokeTask:
+    env_cfg: LiberoEnv
+    suite_name: str
+    task_id: int
+    task_name: str | None = None
+    task_prompt: str | None = None
 
 
 def _rewrite_legacy_config_flag() -> None:
@@ -157,13 +167,32 @@ def _extract_success(info: dict[str, Any]) -> bool:
     return False
 
 
-def resolve_bowl_task_config(
-    env_cfg: LiberoEnv, resolver_cfg: BowlTaskResolverConfig
-) -> tuple[LiberoEnv, str | None, str | None]:
-    if env_cfg.task_ids is not None:
-        if len(env_cfg.task_ids) != 1:
-            raise ValueError("OpenPI bowl smoke requires exactly one resolved LIBERO task_id.")
-        return env_cfg, None, None
+def _normalize_task_ids(task_ids: list[int] | None) -> list[int]:
+    if task_ids is None:
+        return []
+
+    normalized: list[int] = []
+    seen: set[int] = set()
+    for raw_task_id in task_ids:
+        task_id = int(raw_task_id)
+        if task_id in seen:
+            continue
+        normalized.append(task_id)
+        seen.add(task_id)
+    return normalized
+
+
+def resolve_smoke_tasks(env_cfg: LiberoEnv, resolver_cfg: BowlTaskResolverConfig) -> list[ResolvedSmokeTask]:
+    normalized_task_ids = _normalize_task_ids(env_cfg.task_ids)
+    if normalized_task_ids:
+        return [
+            ResolvedSmokeTask(
+                env_cfg=replace(env_cfg, task=env_cfg.task, task_ids=[task_id]),
+                suite_name=env_cfg.task,
+                task_id=task_id,
+            )
+            for task_id in normalized_task_ids
+        ]
 
     try:
         ensure_libero_runtime_ready()
@@ -181,13 +210,26 @@ def resolve_bowl_task_config(
 
     suite = benchmark_dict[suite_name]()
     needle = resolver_cfg.name_contains.lower().strip()
+    matched_tasks: list[ResolvedSmokeTask] = []
     for task_id, task in enumerate(suite.tasks):
         task_name = getattr(task, "name", "")
         task_prompt = getattr(task, "language", "")
         if needle in task_name.lower() or needle in task_prompt.lower():
-            return replace(env_cfg, task=suite_name, task_ids=[task_id]), task_name, task_prompt
+            matched_tasks.append(
+                ResolvedSmokeTask(
+                    env_cfg=replace(env_cfg, task=suite_name, task_ids=[task_id]),
+                    suite_name=suite_name,
+                    task_id=task_id,
+                    task_name=task_name,
+                    task_prompt=task_prompt,
+                )
+            )
+            if resolver_cfg.max_matches is not None and len(matched_tasks) >= resolver_cfg.max_matches:
+                break
 
-    raise ValueError(f"Could not resolve a bowl task in suite '{suite_name}' with token '{needle}'.")
+    if not matched_tasks:
+        raise ValueError(f"Could not resolve a bowl task in suite '{suite_name}' with token '{needle}'.")
+    return matched_tasks
 
 
 def make_single_task_vec_env(env_cfg: LiberoEnv):
@@ -371,13 +413,7 @@ def run_smoke_episode(
 
 def run_bowl_smoke(cfg: OpenPIBowlSmokeConfig) -> dict[str, Any]:
     set_seed(cfg.runtime.seed)
-    resolved_env_cfg, resolved_task_name, resolved_task_prompt = resolve_bowl_task_config(
-        cfg.env, cfg.bowl_task_resolver
-    )
-    suite_name, task_id, vec_env = make_single_task_vec_env(resolved_env_cfg)
-    resolved_task_name = resolved_task_name or getattr(vec_env.envs[0], "task", None)
-    resolved_task_prompt = resolved_task_prompt or getattr(vec_env.envs[0], "task_description", None)
-    env_preprocessor = make_smoke_env_preprocessor(resolved_env_cfg)
+    resolved_tasks = resolve_smoke_tasks(cfg.env, cfg.bowl_task_resolver)
     variation_profile = build_variation_profile(cfg.variation)
     output_dir = Path(cfg.runtime.output_dir)
     traces_dir = output_dir / "traces"
@@ -389,75 +425,114 @@ def run_bowl_smoke(cfg: OpenPIBowlSmokeConfig) -> dict[str, Any]:
     )
 
     episode_summaries: list[dict[str, Any]] = []
+    task_summaries: list[dict[str, Any]] = []
+    global_episode_index = 0
     try:
-        for episode_index in range(cfg.runtime.n_episodes):
-            if variation_profile is not None and hasattr(vec_env.envs[0], "set_variation_profile"):
-                vec_env.envs[0].set_variation_profile(variation_profile, seed=cfg.variation.seed + episode_index)
+        for resolved_task in resolved_tasks:
+            suite_name, task_id, vec_env = make_single_task_vec_env(resolved_task.env_cfg)
+            resolved_task_name = resolved_task.task_name or getattr(vec_env.envs[0], "task", None)
+            resolved_task_prompt = resolved_task.task_prompt or getattr(vec_env.envs[0], "task_description", None)
+            env_preprocessor = make_smoke_env_preprocessor(resolved_task.env_cfg)
+            task_episode_summaries: list[dict[str, Any]] = []
 
             try:
-                artifacts = run_smoke_episode(
-                    vec_env,
-                    adapter,
-                    env_preprocessor,
-                    cfg.runtime,
-                    suite_name=suite_name,
-                    task_id=task_id,
-                    episode_index=episode_index,
-                    task_name=resolved_task_name,
-                    task_prompt=resolved_task_prompt,
-                    control_dt=1.0 / float(resolved_env_cfg.fps),
-                    spec=adapter.spec,
-                    record_video=cfg.runtime.write_video,
-                )
-            except Exception as exc:  # noqa: BLE001
-                if cfg.runtime.fail_fast:
-                    raise
-                artifacts = SmokeEpisodeArtifacts(
-                    trace=EpisodeTrace(
-                        success=False,
-                        metadata={
-                            "suite": suite_name,
-                            "task_id": task_id,
-                            "task_name": resolved_task_name,
-                            "task_prompt": resolved_task_prompt,
-                            "exception": repr(exc),
-                        },
-                    )
-                )
+                for task_episode_index in range(cfg.runtime.n_episodes):
+                    if variation_profile is not None and hasattr(vec_env.envs[0], "set_variation_profile"):
+                        vec_env.envs[0].set_variation_profile(
+                            variation_profile,
+                            seed=cfg.variation.seed + global_episode_index,
+                        )
 
-            trace = artifacts.trace
-            trace_path = None
-            if cfg.runtime.write_trace:
-                trace_path = write_episode_trace(trace, traces_dir, episode_index)
+                    try:
+                        artifacts = run_smoke_episode(
+                            vec_env,
+                            adapter,
+                            env_preprocessor,
+                            cfg.runtime,
+                            suite_name=suite_name,
+                            task_id=task_id,
+                            episode_index=global_episode_index,
+                            task_name=resolved_task_name,
+                            task_prompt=resolved_task_prompt,
+                            control_dt=1.0 / float(resolved_task.env_cfg.fps),
+                            spec=adapter.spec,
+                            record_video=cfg.runtime.write_video,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        if cfg.runtime.fail_fast:
+                            raise
+                        artifacts = SmokeEpisodeArtifacts(
+                            trace=EpisodeTrace(
+                                success=False,
+                                metadata={
+                                    "suite": suite_name,
+                                    "task_id": task_id,
+                                    "task_name": resolved_task_name,
+                                    "task_prompt": resolved_task_prompt,
+                                    "exception": repr(exc),
+                                },
+                            )
+                        )
 
-            video_path = None
-            if cfg.runtime.write_video and artifacts.video_frames:
-                videos_dir.mkdir(parents=True, exist_ok=True)
-                video_path = videos_dir / f"episode_{episode_index:03d}.mp4"
-                write_video(
-                    str(video_path),
-                    artifacts.video_frames,
-                    fps=cfg.runtime.video_fps or int(resolved_env_cfg.fps),
-                )
+                    trace = artifacts.trace
+                    trace_path = None
+                    if cfg.runtime.write_trace:
+                        trace_path = write_episode_trace(trace, traces_dir, global_episode_index)
 
-            episode_summaries.append(
+                    video_path = None
+                    if cfg.runtime.write_video and artifacts.video_frames:
+                        videos_dir.mkdir(parents=True, exist_ok=True)
+                        video_path = videos_dir / f"episode_{global_episode_index:03d}.mp4"
+                        write_video(
+                            str(video_path),
+                            artifacts.video_frames,
+                            fps=cfg.runtime.video_fps or int(resolved_task.env_cfg.fps),
+                        )
+
+                    episode_summary = {
+                        "episode_index": global_episode_index,
+                        "task_episode_index": task_episode_index,
+                        "suite": suite_name,
+                        "task_id": task_id,
+                        "task_name": resolved_task_name,
+                        "task_prompt": resolved_task_prompt,
+                        "success": trace.success,
+                        "metrics": dict(trace.metrics),
+                        "trace_path": str(trace_path) if trace_path is not None else None,
+                        "video_path": str(video_path) if video_path is not None else None,
+                        "variation": trace.metadata.get("variation", {}),
+                        "exception": trace.metadata.get("exception"),
+                    }
+                    task_episode_summaries.append(episode_summary)
+                    episode_summaries.append(episode_summary)
+                    global_episode_index += 1
+            finally:
+                vec_env.close()
+
+            task_success_rate = sum(1 for item in task_episode_summaries if item["success"]) / max(
+                len(task_episode_summaries), 1
+            )
+            task_summaries.append(
                 {
-                    "episode_index": episode_index,
-                    "success": trace.success,
-                    "metrics": dict(trace.metrics),
-                    "trace_path": str(trace_path) if trace_path is not None else None,
-                    "video_path": str(video_path) if video_path is not None else None,
-                    "variation": trace.metadata.get("variation", {}),
-                    "exception": trace.metadata.get("exception"),
+                    "suite": suite_name,
+                    "task_id": task_id,
+                    "task_name": resolved_task_name,
+                    "task_prompt": resolved_task_prompt,
+                    "episodes": task_episode_summaries,
+                    "success_rate": task_success_rate,
                 }
             )
 
         success_rate = sum(1 for item in episode_summaries if item["success"]) / max(len(episode_summaries), 1)
+        summary_task = task_summaries[0] if len(task_summaries) == 1 else None
         summary = {
-            "suite": suite_name,
-            "task_id": task_id,
-            "task_name": resolved_task_name,
-            "task_prompt": resolved_task_prompt,
+            "suite": summary_task["suite"] if summary_task is not None else None,
+            "task_id": summary_task["task_id"] if summary_task is not None else None,
+            "task_name": summary_task["task_name"] if summary_task is not None else None,
+            "task_prompt": summary_task["task_prompt"] if summary_task is not None else None,
+            "num_tasks": len(task_summaries),
+            "episodes_per_task": cfg.runtime.n_episodes,
+            "tasks": task_summaries,
             "episodes": episode_summaries,
             "success_rate": success_rate,
             "output_dir": str(output_dir),
@@ -469,7 +544,6 @@ def run_bowl_smoke(cfg: OpenPIBowlSmokeConfig) -> dict[str, Any]:
         return summary
     finally:
         adapter.close()
-        vec_env.close()
 
 
 @parser.wrap()

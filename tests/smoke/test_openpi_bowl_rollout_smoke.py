@@ -69,9 +69,10 @@ class _FakePolicyClient:
 class _FakeSingleEnv:
     metadata = {"render_fps": 30}
 
-    def __init__(self):
-        self.task = "pick_up_the_bowl"
-        self.task_description = "pick up the bowl"
+    def __init__(self, task_id: int = 0):
+        self.task = f"pick_up_the_bowl_{task_id}"
+        self.task_description = f"pick up the bowl task {task_id}"
+        self.task_id = task_id
         self.last_variation_sample = {}
         self._profile = None
         self._rng = np.random.default_rng(0)
@@ -106,8 +107,8 @@ class _FakeSingleEnv:
 
 
 class _FakeVecEnv:
-    def __init__(self):
-        self.envs = [_FakeSingleEnv()]
+    def __init__(self, task_id: int = 0):
+        self.envs = [_FakeSingleEnv(task_id=task_id)]
         self.num_envs = 1
 
     def reset(self, seed=None):
@@ -131,7 +132,11 @@ def test_run_bowl_smoke_writes_summary_and_trace(tmp_path, monkeypatch):
             (_cfg, action_dim, action_horizon)
         ),
     )
-    monkeypatch.setattr(smoke, "make_single_task_vec_env", lambda env_cfg: ("libero_object", 3, _FakeVecEnv()))
+    monkeypatch.setattr(
+        smoke,
+        "make_single_task_vec_env",
+        lambda env_cfg: ("libero_object", env_cfg.task_ids[0], _FakeVecEnv(task_id=env_cfg.task_ids[0])),
+    )
 
     cfg = smoke.OpenPIBowlSmokeConfig(
         env=LiberoEnv(task="libero_object", task_ids=[3], autoreset_on_done=False),
@@ -141,6 +146,45 @@ def test_run_bowl_smoke_writes_summary_and_trace(tmp_path, monkeypatch):
     summary = smoke.run_bowl_smoke(cfg)
 
     assert summary["success_rate"] == 1.0
+    assert summary["num_tasks"] == 1
+    assert len(summary["tasks"]) == 1
     assert Path(tmp_path / "summary.json").exists()
     assert Path(summary["episodes"][0]["trace_path"]).exists()
     assert Path(summary["episodes"][0]["video_path"]).exists()
+
+
+def test_run_bowl_smoke_supports_multiple_tasks_with_variation(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        smoke,
+        "make_openpi_jax_client",
+        lambda _cfg, *, action_dim, action_horizon: _FakePolicyClient(
+            (_cfg, action_dim, action_horizon)
+        ),
+    )
+    monkeypatch.setattr(
+        smoke,
+        "make_single_task_vec_env",
+        lambda env_cfg: ("libero_spatial", env_cfg.task_ids[0], _FakeVecEnv(task_id=env_cfg.task_ids[0])),
+    )
+
+    cfg = smoke.OpenPIBowlSmokeConfig(
+        env=LiberoEnv(task="libero_spatial", task_ids=[0, 1], autoreset_on_done=False),
+        runtime=smoke.SmokeRuntimeConfig(
+            n_episodes=1,
+            max_steps=5,
+            output_dir=str(tmp_path),
+            write_video=False,
+        ),
+    )
+
+    summary = smoke.run_bowl_smoke(cfg)
+
+    assert summary["num_tasks"] == 2
+    assert len(summary["tasks"]) == 2
+    assert len(summary["episodes"]) == 2
+    assert summary["tasks"][0]["task_id"] == 0
+    assert summary["tasks"][1]["task_id"] == 1
+    assert summary["episodes"][0]["variation"]
+    assert summary["episodes"][1]["variation"]
+    assert Path(summary["episodes"][0]["trace_path"]).exists()
+    assert Path(summary["episodes"][1]["trace_path"]).exists()

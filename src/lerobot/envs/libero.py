@@ -82,6 +82,18 @@ def get_libero_dummy_action():
     return [0, 0, 0, 0, 0, 0, -1]
 
 
+def _get_underlying_done_flag(env: Any) -> bool:
+    current = env
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        done = getattr(current, "done", None)
+        if done is not None:
+            return bool(done)
+        current = getattr(current, "env", None)
+    return False
+
+
 ACTION_DIM = 7
 ACTION_LOW = -1.0
 ACTION_HIGH = 1.0
@@ -350,29 +362,37 @@ class LiberoEnv(gym.Env):
             )
         raw_obs, reward, done, info = self._env.step(action)
 
-        is_success = self._env.check_success()
-        terminated = done or is_success
+        is_success = bool(self._env.check_success())
+        base_done = bool(done) or _get_underlying_done_flag(self._env)
+        terminated = bool(done) or is_success
+        truncated = base_done and not terminated
+        episode_done = terminated or truncated
         info.update(
             {
                 "task": self.task,
                 "task_id": self.task_id,
-                "done": done,
+                "done": episode_done,
+                "terminated": terminated,
+                "truncated": truncated,
+                "robosuite_done": base_done,
                 "is_success": is_success,
                 "variation": dict(self.last_variation_sample),
             }
         )
         observation = self._format_raw_obs(raw_obs)
-        if terminated:
+        if episode_done:
             info["final_info"] = {
                 "task": self.task,
                 "task_id": self.task_id,
-                "done": bool(done),
+                "done": bool(episode_done),
+                "terminated": bool(terminated),
+                "truncated": bool(truncated),
+                "robosuite_done": bool(base_done),
                 "is_success": bool(is_success),
                 "variation": dict(self.last_variation_sample),
             }
             if self.autoreset_on_done:
                 self.reset()
-        truncated = False
         return observation, reward, terminated, truncated, info
 
     def close(self):

@@ -124,6 +124,7 @@ class _FakeOffscreenEnv:
         self.sim = _FakeSim()
         self.robots = [_FakeRobot()]
         self.seed_value = None
+        self.done = False
 
     def seed(self, seed: int | None) -> None:
         self.seed_value = seed
@@ -144,11 +145,28 @@ class _FakeOffscreenEnv:
         return None
 
 
+class _FakeTruncatedOffscreenEnv(_FakeOffscreenEnv):
+    def __init__(self):
+        super().__init__()
+        self.env = self
+
+    def step(self, _action: object):
+        self.done = True
+        return _make_raw_obs(), 0.0, False, {}
+
+
 def _make_fake_env(self, task_suite, task_id):
     task = task_suite.get_task(task_id)
     self.task = task.name
     self.task_description = task.language
     return _FakeOffscreenEnv()
+
+
+def _make_fake_truncated_env(self, task_suite, task_id):
+    task = task_suite.get_task(task_id)
+    self.task = task.name
+    self.task_description = task.language
+    return _FakeTruncatedOffscreenEnv()
 
 
 def test_libero_env_variation_hook_applies_before_episode(monkeypatch):
@@ -190,3 +208,27 @@ def test_libero_env_variation_hook_applies_before_episode(monkeypatch):
 
     assert terminated is False
     assert step_info["variation"] == info["variation"]
+
+
+def test_libero_env_step_reports_truncation_when_underlying_done_flag_is_set(monkeypatch):
+    monkeypatch.setattr(LiberoEnv, "_make_envs_task", _make_fake_truncated_env)
+
+    env = LiberoEnv(
+        task_suite=_FakeSuite(),
+        task_id=0,
+        task_suite_name="libero_object",
+        obs_type="pixels_agent_pos",
+        init_states=False,
+        num_steps_wait=0,
+        autoreset_on_done=False,
+    )
+
+    env.reset(seed=123)
+
+    _observation, _reward, terminated, truncated, info = env.step(np.zeros(7, dtype=np.float32))
+
+    assert terminated is False
+    assert truncated is True
+    assert info["done"] is True
+    assert info["robosuite_done"] is True
+    assert info["final_info"]["truncated"] is True

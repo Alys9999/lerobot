@@ -64,3 +64,9 @@ def write_episode_trace(trace: EpisodeTrace, output_dir: Path, episode_index: in
     with output_path.open("w", encoding="utf-8") as handle:
         json.dump(episode_trace_to_summary_dict(trace), handle, indent=2)
     return output_path
+
+
+def read_episode_trace_summary(path: str | Path) -> dict[str, Any]:
+    trace_path = Path(path)
+    with trace_path.open("r", encoding="utf-8") as handle:
+        return json.load(handle)

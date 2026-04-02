@@ -40,6 +40,7 @@ class OpenPIJaxLiberoSpec:
     state_observation_key: str = OBS_STATE
     state_packet_key: str = "libero_state_8d"
     state_remote_key: str = "observation/state"
+    state_dim: int = 8
     prompt_remote_key: str = "prompt"
     prompt_required: bool = True
     action_space: str = "env_native_7d"

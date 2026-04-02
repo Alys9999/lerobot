@@ -21,6 +21,7 @@ from gymnasium.envs.registration import registry as gym_registry
 
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.envs.configs import AlohaEnv, EnvConfig, HubEnvConfig, IsaaclabArenaEnv, LiberoEnv, PushtEnv
+from lerobot.envs.libero_bootstrap import ensure_libero_runtime_ready
 from lerobot.envs.utils import _call_make_env, _download_hub_file, _import_hub_module, _normalize_hub_result
 from lerobot.policies.xvla.configuration_xvla import XVLAConfig
 from lerobot.processor import ProcessorStep
@@ -166,6 +167,7 @@ def make_env(
     env_cls = gym.vector.AsyncVectorEnv if use_async_envs else gym.vector.SyncVectorEnv
 
     if "libero" in cfg.type:
+        ensure_libero_runtime_ready()
         from lerobot.envs.libero import create_libero_envs
 
         if cfg.task is None:

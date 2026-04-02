@@ -21,7 +21,6 @@ from pathlib import Path
 import numpy as np
 
 from lerobot.envs.configs import LiberoEnv
-from lerobot.runtime.contracts import ActionCommand, PolicyResponse
 from lerobot.scripts import lerobot_openpi_bowl_smoke as smoke
 
 
@@ -58,7 +57,7 @@ class _FakePolicyClient:
         self.server_metadata = {"server": "fake"}
 
     def infer(self, _observation):
-        return {"actions": np.full((2, 7), 0.25, dtype=np.float32)}
+        return {"actions": np.full((10, 7), 0.25, dtype=np.float32)}
 
     def reset(self) -> None:
         return None
@@ -91,6 +90,9 @@ class _FakeSingleEnv:
             self.last_variation_sample = self._profile.sample_all(self._rng)
         return _make_observation_batch(), {"variation": dict(self.last_variation_sample)}
 
+    def render(self):
+        return np.full((8, 8, 3), 127, dtype=np.uint8)
+
     def step(self, _action):
         self._step += 1
         done = self._step >= 2
@@ -122,7 +124,13 @@ class _FakeVecEnv:
 
 
 def test_run_bowl_smoke_writes_summary_and_trace(tmp_path, monkeypatch):
-    monkeypatch.setattr(smoke, "WebsocketOpenPIJaxClient", _FakePolicyClient)
+    monkeypatch.setattr(
+        smoke,
+        "make_openpi_jax_client",
+        lambda _cfg, *, action_dim, action_horizon: _FakePolicyClient(
+            (_cfg, action_dim, action_horizon)
+        ),
+    )
     monkeypatch.setattr(smoke, "make_single_task_vec_env", lambda env_cfg: ("libero_object", 3, _FakeVecEnv()))
 
     cfg = smoke.OpenPIBowlSmokeConfig(
@@ -135,3 +143,4 @@ def test_run_bowl_smoke_writes_summary_and_trace(tmp_path, monkeypatch):
     assert summary["success_rate"] == 1.0
     assert Path(tmp_path / "summary.json").exists()
     assert Path(summary["episodes"][0]["trace_path"]).exists()
+    assert Path(summary["episodes"][0]["video_path"]).exists()

@@ -44,7 +44,10 @@ def validate_openpi_jax_policy_request(req: PolicyRequest, spec: Any) -> None:
         f"Missing required robot state key '{spec.state_packet_key}'.",
     )
     state = np.asarray(obs.robot_state[spec.state_packet_key], dtype=np.float32).reshape(-1)
-    _require(state.shape[0] == 8, f"Expected 8D LIBERO state, got {state.shape[0]}.")
+    _require(
+        state.shape[0] == spec.state_dim,
+        f"Expected {spec.state_dim}D LIBERO state, got {state.shape[0]}.",
+    )
 
     if spec.prompt_required:
         _require(bool(obs.task_text and obs.task_text.strip()), "Prompt is required for OpenPI JAX LIBERO.")
@@ -61,8 +64,16 @@ def validate_action_command_for_spec(action: ActionCommand, spec: Any) -> None:
         values = values.reshape(1, -1)
     _require(values.ndim == 2, f"Expected action values with shape (H, D), got {values.shape}.")
     _require(
+        action.horizon == values.shape[0],
+        f"ActionCommand horizon {action.horizon} != action values horizon {values.shape[0]}.",
+    )
+    _require(
         values.shape[1] == spec.action_dim,
         f"Expected action dim {spec.action_dim}, got {values.shape[1]}.",
+    )
+    _require(
+        values.shape[0] == spec.action_horizon,
+        f"Expected action horizon {spec.action_horizon}, got {values.shape[0]}.",
     )
     _require(
         action.action_space == spec.action_space,

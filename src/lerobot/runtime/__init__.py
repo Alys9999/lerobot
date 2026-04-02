@@ -25,7 +25,7 @@ from .contracts import (
     RuntimeSpec,
     TaskSpec,
 )
-from .trace import write_episode_trace
+from .trace import read_episode_trace_summary, write_episode_trace
 from .variation import VariationConfig, VariationProfile, build_variation_profile
 
 __all__ = [
@@ -41,6 +41,7 @@ __all__ = [
     "VariationConfig",
     "VariationProfile",
     "build_variation_profile",
+    "read_episode_trace_summary",
     "validate_action_command_for_spec",
     "validate_openpi_jax_policy_request",
     "write_episode_trace",

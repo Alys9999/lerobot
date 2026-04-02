@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from lerobot.adapters.openpi_jax.output_codec_libero import OpenPIJaxLiberoOutputCodec
 from lerobot.runtime.contracts import ObservationPacket, PolicyRequest, RobotSpec, RuntimeSpec, TaskSpec
@@ -45,9 +46,36 @@ def test_openpi_jax_output_codec_libero_slices_to_env_action_dim():
         runtime_spec=RuntimeSpec(control_dt=1 / 30, max_steps=300),
     )
 
-    output = codec.decode({"actions": np.ones((4, 9), dtype=np.float32)}, request)
+    output = codec.decode({"actions": np.ones((codec.spec.action_horizon, 9), dtype=np.float32)}, request)
 
     assert output.action_space == "env_native_7d"
-    assert output.values.shape == (4, 7)
-    assert output.horizon == 4
+    assert output.values.shape == (codec.spec.action_horizon, 7)
+    assert output.horizon == codec.spec.action_horizon
     assert output.control_dt == 1 / 30
+
+
+def test_openpi_jax_output_codec_libero_rejects_bad_horizon():
+    codec = OpenPIJaxLiberoOutputCodec()
+    request = PolicyRequest(
+        observation=ObservationPacket(
+            timestamp=0.0,
+            episode_id="ep0",
+            step_id=0,
+            images={
+                "third_person": np.zeros((8, 8, 3), dtype=np.uint8),
+                "left_wrist": np.zeros((8, 8, 3), dtype=np.uint8),
+            },
+            robot_state={"libero_state_8d": np.zeros(8, dtype=np.float32)},
+            task_text="pick up the bowl",
+            task_id="3",
+            robot_id="franka_panda",
+            embodiment_id="libero",
+            backend_id="mujoco",
+        ),
+        robot_spec=RobotSpec(robot_id="franka_panda", action_dim=7),
+        task_spec=TaskSpec(task_suite="libero_object", task_id="3", prompt="pick up the bowl"),
+        runtime_spec=RuntimeSpec(control_dt=1 / 30, max_steps=300),
+    )
+
+    with pytest.raises(ValueError, match="Expected action horizon 10"):
+        codec.decode({"actions": np.ones((4, 9), dtype=np.float32)}, request)

@@ -20,11 +20,15 @@ import numpy as np
 import pytest
 
 from lerobot.adapters.openpi_jax.spec import OpenPIJaxLiberoSpec
-from lerobot.runtime.compatibility import CompatibilityError, validate_openpi_jax_policy_request
-from lerobot.runtime.contracts import ObservationPacket, PolicyRequest, RobotSpec, RuntimeSpec, TaskSpec
+from lerobot.runtime.compatibility import (
+    CompatibilityError,
+    validate_action_command_for_spec,
+    validate_openpi_jax_policy_request,
+)
+from lerobot.runtime.contracts import ActionCommand, ObservationPacket, PolicyRequest, RobotSpec, RuntimeSpec, TaskSpec
 
 
-def _make_request() -> PolicyRequest:
+def _make_request(*, state_dim: int = 8) -> PolicyRequest:
     return PolicyRequest(
         observation=ObservationPacket(
             timestamp=0.0,
@@ -34,7 +38,7 @@ def _make_request() -> PolicyRequest:
                 "third_person": np.zeros((8, 8, 3), dtype=np.uint8),
                 "left_wrist": np.zeros((8, 8, 3), dtype=np.uint8),
             },
-            robot_state={"libero_state_8d": np.zeros(8, dtype=np.float32)},
+            robot_state={"libero_state_8d": np.zeros(state_dim, dtype=np.float32)},
             task_text="pick up the bowl",
             task_id="3",
             robot_id="franka_panda",
@@ -51,9 +55,25 @@ def test_validate_openpi_jax_policy_request_accepts_valid_request():
     validate_openpi_jax_policy_request(_make_request(), OpenPIJaxLiberoSpec())
 
 
+def test_validate_openpi_jax_policy_request_uses_spec_state_dim():
+    request = _make_request(state_dim=6)
+    validate_openpi_jax_policy_request(request, OpenPIJaxLiberoSpec(state_dim=6))
+
+
 def test_validate_openpi_jax_policy_request_rejects_bad_state_dim():
     request = _make_request()
     request.observation.robot_state["libero_state_8d"] = np.zeros(6, dtype=np.float32)
 
     with pytest.raises(CompatibilityError, match="Expected 8D LIBERO state"):
         validate_openpi_jax_policy_request(request, OpenPIJaxLiberoSpec())
+
+
+def test_validate_action_command_for_spec_rejects_bad_horizon():
+    action = ActionCommand(
+        action_space="env_native_7d",
+        values=np.zeros((4, 7), dtype=np.float32),
+        horizon=4,
+    )
+
+    with pytest.raises(CompatibilityError, match="Expected action horizon 10"):
+        validate_action_command_for_spec(action, OpenPIJaxLiberoSpec())

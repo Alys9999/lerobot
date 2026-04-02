@@ -15,13 +15,21 @@
 # limitations under the License.
 
 from .adapter import OpenPIJaxAdapter
-from .client import OpenPIJaxClientConfig, OpenPIJaxClientProtocol, OpenPIJaxTransportError
+from .client import (
+    MockOpenPIJaxClient,
+    OpenPIJaxClientConfig,
+    OpenPIJaxClientProtocol,
+    OpenPIJaxTransportError,
+    make_openpi_jax_client,
+)
 from .spec import OpenPIJaxLiberoSpec
 
 __all__ = [
+    "MockOpenPIJaxClient",
     "OpenPIJaxAdapter",
     "OpenPIJaxClientConfig",
     "OpenPIJaxClientProtocol",
     "OpenPIJaxLiberoSpec",
     "OpenPIJaxTransportError",
+    "make_openpi_jax_client",
 ]

@@ -38,6 +38,8 @@ class OpenPIJaxLiberoOutputCodec:
             values = values.reshape(1, -1)
         if values.ndim != 2:
             raise ValueError(f"Expected action chunk with shape (H, D), got {values.shape}.")
+        if values.shape[0] != self.spec.action_horizon:
+            raise ValueError(f"Expected action horizon {self.spec.action_horizon}, got {values.shape[0]}.")
         if values.shape[1] < self.spec.action_dim:
             raise ValueError(
                 f"Expected action dim >= {self.spec.action_dim}, got action chunk with shape {values.shape}."

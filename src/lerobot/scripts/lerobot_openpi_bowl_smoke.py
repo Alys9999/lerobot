@@ -14,8 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from __future__ import annotations
-
 import json
 import logging
 import sys
@@ -28,10 +26,15 @@ from typing import Any
 import numpy as np
 import torch
 
-from lerobot.adapters.openpi_jax import OpenPIJaxAdapter, OpenPIJaxClientConfig
-from lerobot.adapters.openpi_jax.client import WebsocketOpenPIJaxClient
+from lerobot.adapters.openpi_jax import (
+    OpenPIJaxAdapter,
+    OpenPIJaxClientConfig,
+    OpenPIJaxLiberoSpec,
+    make_openpi_jax_client,
+)
 from lerobot.configs import parser
 from lerobot.envs.configs import LiberoEnv
+from lerobot.envs.libero_bootstrap import ensure_libero_runtime_ready
 from lerobot.envs.factory import make_env
 from lerobot.envs.utils import add_envs_task, preprocess_observation
 from lerobot.processor.env_processor import LiberoProcessorStep
@@ -47,8 +50,8 @@ from lerobot.runtime.contracts import (
 )
 from lerobot.runtime.trace import write_episode_trace
 from lerobot.runtime.variation import VariationConfig, build_variation_profile
-from lerobot.utils.constants import OBS_IMAGES, OBS_STATE
 from lerobot.utils.import_utils import register_third_party_plugins
+from lerobot.utils.io_utils import write_video
 from lerobot.utils.random_utils import set_seed
 from lerobot.utils.utils import init_logging
 
@@ -67,6 +70,8 @@ class SmokeRuntimeConfig:
     max_steps: int = 300
     seed: int = 123
     write_trace: bool = True
+    write_video: bool = True
+    video_fps: int | None = None
     output_dir: str = "outputs/openpi_bowl_smoke"
     fail_fast: bool = True
 
@@ -87,6 +92,12 @@ class OpenPIBowlSmokeConfig:
     bowl_task_resolver: BowlTaskResolverConfig = field(default_factory=BowlTaskResolverConfig)
     variation: VariationConfig = field(default_factory=VariationConfig)
     runtime: SmokeRuntimeConfig = field(default_factory=SmokeRuntimeConfig)
+
+
+@dataclass(slots=True)
+class SmokeEpisodeArtifacts:
+    trace: EpisodeTrace
+    video_frames: list[np.ndarray] = field(default_factory=list)
 
 
 def _rewrite_legacy_config_flag() -> None:
@@ -155,6 +166,7 @@ def resolve_bowl_task_config(
         return env_cfg, None, None
 
     try:
+        ensure_libero_runtime_ready()
         from libero.libero import benchmark
     except ImportError as exc:
         raise ImportError(
@@ -196,6 +208,22 @@ def make_smoke_env_preprocessor(env_cfg: LiberoEnv) -> PolicyProcessorPipeline[d
     return PolicyProcessorPipeline(steps=[LiberoProcessorStep()])
 
 
+def capture_smoke_frame(vec_env: Any) -> np.ndarray:
+    if hasattr(vec_env, "envs") and len(vec_env.envs) == 1 and hasattr(vec_env.envs[0], "render"):
+        frame = vec_env.envs[0].render()
+    elif hasattr(vec_env, "render"):
+        frame = vec_env.render()
+        if isinstance(frame, np.ndarray) and frame.ndim == 4:
+            frame = frame[0]
+    else:
+        raise ValueError("Smoke env does not expose a render method that can be used for video capture.")
+
+    frame = np.asarray(frame, dtype=np.uint8)
+    if frame.ndim != 3:
+        raise ValueError(f"Expected rendered frame with shape (H, W, C), got {frame.shape}.")
+    return frame
+
+
 def processed_observation_to_packet(
     processed_observation: dict[str, Any],
     *,
@@ -205,19 +233,23 @@ def processed_observation_to_packet(
     step_id: int,
     task_text: str,
     prev_action: np.ndarray | None = None,
+    spec: OpenPIJaxLiberoSpec | None = None,
 ) -> ObservationPacket:
-    state = np.asarray(_to_numpy_unbatched(processed_observation[OBS_STATE]), dtype=np.float32).reshape(-1)
-    third_person = _to_uint8_hwc_image(processed_observation[f"{OBS_IMAGES}.image"])
-    wrist = _to_uint8_hwc_image(processed_observation[f"{OBS_IMAGES}.image2"])
+    spec = spec or OpenPIJaxLiberoSpec()
+    state = np.asarray(
+        _to_numpy_unbatched(processed_observation[spec.state_observation_key]),
+        dtype=np.float32,
+    ).reshape(-1)
+    images = {
+        alias: _to_uint8_hwc_image(processed_observation[source_key])
+        for alias, source_key in spec.packet_image_keys.items()
+    }
     return ObservationPacket(
         timestamp=time.time(),
         episode_id=f"{suite_name}:{task_id}:episode_{episode_index}",
         step_id=step_id,
-        images={
-            "third_person": third_person,
-            "left_wrist": wrist,
-        },
-        robot_state={"libero_state_8d": state},
+        images=images,
+        robot_state={spec.state_packet_key: state},
         task_text=task_text,
         task_id=str(task_id),
         robot_id="franka_panda",
@@ -239,10 +271,14 @@ def run_smoke_episode(
     task_name: str | None = None,
     task_prompt: str | None = None,
     control_dt: float = 1 / 30,
-) -> EpisodeTrace:
+    spec: OpenPIJaxLiberoSpec | None = None,
+    record_video: bool = False,
+) -> SmokeEpisodeArtifacts:
+    spec = spec or OpenPIJaxLiberoSpec()
     adapter.reset()
     seed = runtime_cfg.seed + episode_index
     observation, _info = vec_env.reset(seed=seed)
+    video_frames = [capture_smoke_frame(vec_env)] if record_video else []
     current_task_prompt = task_prompt or getattr(vec_env.envs[0], "task_description", "") or ""
     current_task_name = task_name or getattr(vec_env.envs[0], "task", "") or ""
     variation = dict(getattr(vec_env.envs[0], "last_variation_sample", {}))
@@ -260,8 +296,8 @@ def run_smoke_episode(
 
     robot_spec = RobotSpec(
         robot_id="franka_panda",
-        action_dim=7,
-        camera_keys=("third_person", "left_wrist"),
+        action_dim=spec.action_dim,
+        camera_keys=tuple(spec.required_image_keys),
     )
     task_spec = TaskSpec(task_suite=suite_name, task_id=str(task_id), prompt=current_task_prompt)
     runtime_spec = RuntimeSpec(control_dt=control_dt, max_steps=runtime_cfg.max_steps)
@@ -284,6 +320,7 @@ def run_smoke_episode(
             step_id=step_id,
             task_text=current_task_prompt,
             prev_action=prev_action,
+            spec=spec,
         )
         trace.observations.append(packet)
 
@@ -306,6 +343,8 @@ def run_smoke_episode(
         action = pending_actions.popleft()
         prev_action = action.copy()
         observation, reward, terminated, truncated, info = vec_env.step(action.reshape(1, -1))
+        if record_video:
+            video_frames.append(capture_smoke_frame(vec_env))
         reward_value = float(np.asarray(reward, dtype=np.float32).reshape(-1)[0])
         done = bool(np.asarray(terminated | truncated).reshape(-1)[0])
 
@@ -327,7 +366,7 @@ def run_smoke_episode(
         "avg_latency_ms": float(np.mean(latencies_ms)) if latencies_ms else 0.0,
         "max_latency_ms": float(np.max(latencies_ms)) if latencies_ms else 0.0,
     }
-    return trace
+    return SmokeEpisodeArtifacts(trace=trace, video_frames=video_frames)
 
 
 def run_bowl_smoke(cfg: OpenPIBowlSmokeConfig) -> dict[str, Any]:
@@ -336,11 +375,18 @@ def run_bowl_smoke(cfg: OpenPIBowlSmokeConfig) -> dict[str, Any]:
         cfg.env, cfg.bowl_task_resolver
     )
     suite_name, task_id, vec_env = make_single_task_vec_env(resolved_env_cfg)
+    resolved_task_name = resolved_task_name or getattr(vec_env.envs[0], "task", None)
+    resolved_task_prompt = resolved_task_prompt or getattr(vec_env.envs[0], "task_description", None)
     env_preprocessor = make_smoke_env_preprocessor(resolved_env_cfg)
     variation_profile = build_variation_profile(cfg.variation)
     output_dir = Path(cfg.runtime.output_dir)
     traces_dir = output_dir / "traces"
-    adapter = OpenPIJaxAdapter(WebsocketOpenPIJaxClient(cfg.policy))
+    videos_dir = output_dir / "videos"
+    spec = OpenPIJaxLiberoSpec()
+    adapter = OpenPIJaxAdapter(
+        make_openpi_jax_client(cfg.policy, action_dim=spec.action_dim, action_horizon=spec.action_horizon),
+        spec=spec,
+    )
 
     episode_summaries: list[dict[str, Any]] = []
     try:
@@ -349,7 +395,7 @@ def run_bowl_smoke(cfg: OpenPIBowlSmokeConfig) -> dict[str, Any]:
                 vec_env.envs[0].set_variation_profile(variation_profile, seed=cfg.variation.seed + episode_index)
 
             try:
-                trace = run_smoke_episode(
+                artifacts = run_smoke_episode(
                     vec_env,
                     adapter,
                     env_preprocessor,
@@ -360,24 +406,39 @@ def run_bowl_smoke(cfg: OpenPIBowlSmokeConfig) -> dict[str, Any]:
                     task_name=resolved_task_name,
                     task_prompt=resolved_task_prompt,
                     control_dt=1.0 / float(resolved_env_cfg.fps),
+                    spec=adapter.spec,
+                    record_video=cfg.runtime.write_video,
                 )
             except Exception as exc:  # noqa: BLE001
                 if cfg.runtime.fail_fast:
                     raise
-                trace = EpisodeTrace(
-                    success=False,
-                    metadata={
-                        "suite": suite_name,
-                        "task_id": task_id,
-                        "task_name": resolved_task_name,
-                        "task_prompt": resolved_task_prompt,
-                        "exception": repr(exc),
-                    },
+                artifacts = SmokeEpisodeArtifacts(
+                    trace=EpisodeTrace(
+                        success=False,
+                        metadata={
+                            "suite": suite_name,
+                            "task_id": task_id,
+                            "task_name": resolved_task_name,
+                            "task_prompt": resolved_task_prompt,
+                            "exception": repr(exc),
+                        },
+                    )
                 )
 
+            trace = artifacts.trace
             trace_path = None
             if cfg.runtime.write_trace:
                 trace_path = write_episode_trace(trace, traces_dir, episode_index)
+
+            video_path = None
+            if cfg.runtime.write_video and artifacts.video_frames:
+                videos_dir.mkdir(parents=True, exist_ok=True)
+                video_path = videos_dir / f"episode_{episode_index:03d}.mp4"
+                write_video(
+                    str(video_path),
+                    artifacts.video_frames,
+                    fps=cfg.runtime.video_fps or int(resolved_env_cfg.fps),
+                )
 
             episode_summaries.append(
                 {
@@ -385,6 +446,7 @@ def run_bowl_smoke(cfg: OpenPIBowlSmokeConfig) -> dict[str, Any]:
                     "success": trace.success,
                     "metrics": dict(trace.metrics),
                     "trace_path": str(trace_path) if trace_path is not None else None,
+                    "video_path": str(video_path) if video_path is not None else None,
                     "variation": trace.metadata.get("variation", {}),
                     "exception": trace.metadata.get("exception"),
                 }

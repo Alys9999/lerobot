@@ -19,6 +19,7 @@ from __future__ import annotations
 import numpy as np
 
 from lerobot.adapters.openpi_jax.input_codec_libero import OpenPIJaxLiberoInputCodec
+from lerobot.adapters.openpi_jax.spec import OpenPIJaxLiberoSpec
 from lerobot.runtime.contracts import ObservationPacket, PolicyRequest, RobotSpec, RuntimeSpec, TaskSpec
 
 
@@ -60,3 +61,50 @@ def test_openpi_jax_input_codec_libero_encodes_expected_keys():
     assert encoded["observation/state"].shape == (8,)
     assert encoded["observation/state"].dtype == np.float32
     assert encoded["prompt"] == "pick up the bowl"
+
+
+def test_openpi_jax_input_codec_libero_supports_nested_chw_images():
+    codec = OpenPIJaxLiberoInputCodec(
+        OpenPIJaxLiberoSpec(
+            env_type="aloha",
+            robot_id="aloha",
+            embodiment_id="aloha",
+            backend_id="gym_aloha",
+            packet_image_keys={"cam_high": "observation.images.top"},
+            remote_image_keys={"cam_high": "cam_high"},
+            state_packet_key="state",
+            state_remote_key="state",
+            state_dim=14,
+            remote_image_container_key="images",
+            remote_image_layout="chw",
+            prompt_required=False,
+            action_space="env_native_14d",
+            action_dim=14,
+            action_horizon=50,
+        )
+    )
+    packet = ObservationPacket(
+        timestamp=0.0,
+        episode_id="ep0",
+        step_id=0,
+        images={"cam_high": np.zeros((32, 32, 3), dtype=np.uint8)},
+        robot_state={"state": np.arange(14, dtype=np.float32)},
+        task_text="transfer cube",
+        task_id="0",
+        robot_id="aloha",
+        embodiment_id="aloha",
+        backend_id="gym_aloha",
+    )
+    request = PolicyRequest(
+        observation=packet,
+        robot_spec=RobotSpec(robot_id="aloha", action_dim=14),
+        task_spec=TaskSpec(task_suite="aloha", task_id="0", prompt="transfer cube"),
+        runtime_spec=RuntimeSpec(control_dt=1 / 50, max_steps=200),
+    )
+
+    encoded = codec.encode(request)
+
+    assert sorted(encoded.keys()) == ["images", "prompt", "state"]
+    assert sorted(encoded["images"].keys()) == ["cam_high"]
+    assert encoded["images"]["cam_high"].shape == (3, 32, 32)
+    assert encoded["state"].shape == (14,)

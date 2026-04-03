@@ -34,6 +34,18 @@ def _require(condition: bool, message: str) -> None:
 
 def validate_openpi_jax_policy_request(req: PolicyRequest, spec: Any) -> None:
     obs = req.observation
+    _require(
+        obs.robot_id == spec.robot_id,
+        f"Observation robot_id {obs.robot_id!r} != expected {spec.robot_id!r}.",
+    )
+    _require(
+        obs.embodiment_id == spec.embodiment_id,
+        f"Observation embodiment_id {obs.embodiment_id!r} != expected {spec.embodiment_id!r}.",
+    )
+    _require(
+        obs.backend_id == spec.backend_id,
+        f"Observation backend_id {obs.backend_id!r} != expected {spec.backend_id!r}.",
+    )
     for image_key in spec.required_image_keys:
         _require(image_key in obs.images, f"Missing required image key '{image_key}'.")
         image = np.asarray(obs.images[image_key])
@@ -52,6 +64,10 @@ def validate_openpi_jax_policy_request(req: PolicyRequest, spec: Any) -> None:
     if spec.prompt_required:
         _require(bool(obs.task_text and obs.task_text.strip()), "Prompt is required for OpenPI JAX LIBERO.")
 
+    _require(
+        req.robot_spec.robot_id == spec.robot_id,
+        f"RobotSpec robot_id {req.robot_spec.robot_id!r} != expected {spec.robot_id!r}.",
+    )
     _require(
         req.robot_spec.action_dim == spec.action_dim,
         f"Robot action dim {req.robot_spec.action_dim} != expected {spec.action_dim}.",

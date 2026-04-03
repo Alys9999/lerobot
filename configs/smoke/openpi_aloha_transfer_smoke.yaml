@@ -1,0 +1,49 @@
+policy:
+  transport: websocket
+  endpoint: ws://127.0.0.1:8000
+  timeout_s: 10.0
+
+policy_spec:
+  model_id: openpi_jax_pi05_aloha
+  env_type: aloha
+  robot_id: aloha
+  embodiment_id: aloha
+  backend_id: gym_aloha
+  packet_image_keys:
+    cam_high: observation.images.top
+  remote_image_keys:
+    cam_high: cam_high
+  state_observation_key: observation.state
+  state_packet_key: state
+  state_remote_key: state
+  state_dim: 14
+  remote_image_container_key: images
+  remote_image_layout: chw
+  prompt_required: false
+  action_space: env_native_14d
+  action_dim: 14
+  action_horizon: 50
+
+env:
+  type: aloha
+  task: AlohaTransferCube-v0
+  obs_type: pixels_agent_pos
+  render_mode: rgb_array
+
+observation:
+  image_flip: false
+  state_components:
+    - eef_pos
+    - eef_axis_angle
+    - gripper_qpos
+
+variation:
+  enabled: false
+
+runtime:
+  n_episodes: 1
+  max_steps: 200
+  write_trace: true
+  write_video: true
+  output_dir: outputs/openpi_aloha_transfer_smoke
+  fail_fast: true

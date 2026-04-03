@@ -21,10 +21,14 @@ from dataclasses import dataclass, field
 from lerobot.utils.constants import OBS_IMAGES, OBS_STATE
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class OpenPIJaxLiberoSpec:
     model_id: str = "openpi_jax_pi05_libero"
+    env_type: str = "libero"
     runtime_transport: str = "websocket"
+    robot_id: str = "franka_panda"
+    embodiment_id: str = "libero"
+    backend_id: str = "mujoco"
     packet_image_keys: dict[str, str] = field(
         default_factory=lambda: {
             "third_person": f"{OBS_IMAGES}.image",
@@ -41,11 +45,40 @@ class OpenPIJaxLiberoSpec:
     state_packet_key: str = "libero_state_8d"
     state_remote_key: str = "observation/state"
     state_dim: int = 8
+    remote_image_container_key: str | None = None
+    remote_image_layout: str = "hwc"
     prompt_remote_key: str = "prompt"
     prompt_required: bool = True
     action_space: str = "env_native_7d"
     action_dim: int = 7
     action_horizon: int = 10
+    server_action_dim: int | None = None
+    output_action_indices: list[int] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        packet_aliases = set(self.packet_image_keys)
+        remote_aliases = set(self.remote_image_keys)
+        if packet_aliases != remote_aliases:
+            raise ValueError(
+                "OpenPIJaxLiberoSpec requires packet_image_keys and remote_image_keys to use the same aliases. "
+                f"Got packet aliases={sorted(packet_aliases)} remote aliases={sorted(remote_aliases)}."
+            )
+        if self.action_dim <= 0:
+            raise ValueError(f"action_dim must be positive, got {self.action_dim}.")
+        if self.action_horizon <= 0:
+            raise ValueError(f"action_horizon must be positive, got {self.action_horizon}.")
+        if self.state_dim <= 0:
+            raise ValueError(f"state_dim must be positive, got {self.state_dim}.")
+        if self.remote_image_layout not in {"hwc", "chw"}:
+            raise ValueError(
+                "remote_image_layout must be either 'hwc' or 'chw'. "
+                f"Got {self.remote_image_layout!r}."
+            )
+        if self.output_action_indices and len(self.output_action_indices) != self.action_dim:
+            raise ValueError(
+                "output_action_indices must either be empty or have one entry per env action dimension. "
+                f"Got len(output_action_indices)={len(self.output_action_indices)} action_dim={self.action_dim}."
+            )
 
     @property
     def required_image_keys(self) -> tuple[str, ...]:

@@ -13,7 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 
@@ -46,6 +46,20 @@ class LiberoProcessorStep(ObservationProcessorStep):
     -   This accounts for the HuggingFaceVLA/libero camera orientation convention.
     """
 
+    image_flip: bool = True
+    state_components: list[str] = field(
+        default_factory=lambda: ["eef_pos", "eef_axis_angle", "gripper_qpos"]
+    )
+    state_output_key: str = OBS_STATE
+
+    def __post_init__(self) -> None:
+        normalized_components: list[str] = []
+        for component in self.state_components:
+            normalized = self._normalize_state_component_name(component)
+            if normalized not in normalized_components:
+                normalized_components.append(normalized)
+        self.state_components = normalized_components
+
     def _process_observation(self, observation):
         """
         Processes both image and robot_state observations from LIBERO.
@@ -55,31 +69,23 @@ class LiberoProcessorStep(ObservationProcessorStep):
             if key.startswith(f"{OBS_IMAGES}."):
                 img = processed_obs[key]
 
-                # Flip both H and W
-                img = torch.flip(img, dims=[2, 3])
+                if self.image_flip:
+                    # Flip both H and W to match the OpenPI/LIBERO camera convention.
+                    img = torch.flip(img, dims=[2, 3])
 
                 processed_obs[key] = img
         # Process robot_state into a flat state vector
         observation_robot_state_str = OBS_PREFIX + "robot_state"
         if observation_robot_state_str in processed_obs:
             robot_state = processed_obs.pop(observation_robot_state_str)
-
-            # Extract components
-            eef_pos = robot_state["eef"]["pos"]  # (B, 3,)
-            eef_quat = robot_state["eef"]["quat"]  # (B, 4,)
-            gripper_qpos = robot_state["gripper"]["qpos"]  # (B, 2,)
-
-            # Convert quaternion to axis-angle
-            eef_axisangle = self._quat2axisangle(eef_quat)  # (B, 3)
-            # Concatenate into a single state vector
-            state = torch.cat((eef_pos, eef_axisangle, gripper_qpos), dim=-1)
+            state = self._build_state_tensor(robot_state)
 
             # ensure float32
             state = state.float()
             if state.dim() == 1:
                 state = state.unsqueeze(0)
 
-            processed_obs[OBS_STATE] = state
+            processed_obs[self.state_output_key] = state
         return processed_obs
 
     def transform_features(
@@ -99,9 +105,9 @@ class LiberoProcessorStep(ObservationProcessorStep):
         state_feats = {}
 
         # add our new flattened state
-        state_feats[OBS_STATE] = PolicyFeature(
+        state_feats[self.state_output_key] = PolicyFeature(
             type=FeatureType.STATE,
-            shape=(8,),  # [eef_pos(3), axis_angle(3), gripper(2)]
+            shape=(self._get_state_dim(),),
         )
 
         new_features[FeatureType.STATE] = state_feats
@@ -110,6 +116,71 @@ class LiberoProcessorStep(ObservationProcessorStep):
 
     def observation(self, observation):
         return self._process_observation(observation)
+
+    def _build_state_tensor(self, robot_state: dict[str, dict[str, torch.Tensor]]) -> torch.Tensor:
+        eef = robot_state["eef"]
+        gripper = robot_state["gripper"]
+        joints = robot_state["joints"]
+
+        component_tensors: dict[str, torch.Tensor] = {
+            "eef_pos": eef["pos"],
+            "eef_quat": eef["quat"],
+            "eef_axis_angle": self._quat2axisangle(eef["quat"]),
+            "eef_mat": eef["mat"].reshape(eef["mat"].shape[0], -1),
+            "gripper_qpos": gripper["qpos"],
+            "gripper_qvel": gripper["qvel"],
+            "joints_pos": joints["pos"],
+            "joints_vel": joints["vel"],
+        }
+
+        state_parts = [component_tensors[name] for name in self.state_components]
+        if not state_parts:
+            raise ValueError("LiberoProcessorStep requires at least one state component.")
+        return torch.cat(state_parts, dim=-1)
+
+    def _get_state_dim(self) -> int:
+        component_dims = {
+            "eef_pos": 3,
+            "eef_quat": 4,
+            "eef_axis_angle": 3,
+            "eef_mat": 9,
+            "gripper_qpos": 2,
+            "gripper_qvel": 2,
+            "joints_pos": 7,
+            "joints_vel": 7,
+        }
+        return sum(component_dims[name] for name in self.state_components)
+
+    @property
+    def state_dim(self) -> int:
+        return self._get_state_dim()
+
+    @staticmethod
+    def _normalize_state_component_name(name: str) -> str:
+        normalized = name.strip().lower()
+        aliases = {
+            "eef_axisangle": "eef_axis_angle",
+            "eef_rotvec": "eef_axis_angle",
+            "joint_pos": "joints_pos",
+            "joint_positions": "joints_pos",
+            "joint_vel": "joints_vel",
+            "joint_velocities": "joints_vel",
+        }
+        normalized = aliases.get(normalized, normalized)
+        allowed = {
+            "eef_pos",
+            "eef_quat",
+            "eef_axis_angle",
+            "eef_mat",
+            "gripper_qpos",
+            "gripper_qvel",
+            "joints_pos",
+            "joints_vel",
+        }
+        if normalized not in allowed:
+            allowed_display = ", ".join(sorted(allowed))
+            raise ValueError(f"Unsupported LIBERO state component '{name}'. Expected one of: {allowed_display}.")
+        return normalized
 
     def _quat2axisangle(self, quat: torch.Tensor) -> torch.Tensor:
         """

@@ -348,6 +348,8 @@ class LiberoEnv(EnvConfig):
         }
         if self.task_ids is not None:
             kwargs["task_ids"] = self.task_ids
+        if self.camera_name_mapping is not None:
+            kwargs["camera_name_mapping"] = self.camera_name_mapping
         return kwargs
 
 

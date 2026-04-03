@@ -39,6 +39,15 @@ def _to_uint8_hwc_image(image: np.ndarray) -> np.ndarray:
     return np.ascontiguousarray(image)
 
 
+def _to_remote_image(image: np.ndarray, *, layout: str) -> np.ndarray:
+    hwc_image = _to_uint8_hwc_image(image)
+    if layout == "hwc":
+        return hwc_image
+    if layout == "chw":
+        return np.ascontiguousarray(np.moveaxis(hwc_image, -1, 0))
+    raise ValueError(f"Unsupported remote image layout {layout!r}.")
+
+
 class OpenPIJaxLiberoInputCodec:
     def __init__(self, spec: OpenPIJaxLiberoSpec | None = None):
         self.spec = spec or OpenPIJaxLiberoSpec()
@@ -52,6 +61,12 @@ class OpenPIJaxLiberoInputCodec:
                 obs.robot_state[self.spec.state_packet_key], dtype=np.float32
             ).reshape(-1),
         }
-        for alias, remote_key in self.spec.remote_image_keys.items():
-            payload[remote_key] = _to_uint8_hwc_image(obs.images[alias])
+        image_payload = {
+            remote_key: _to_remote_image(obs.images[alias], layout=self.spec.remote_image_layout)
+            for alias, remote_key in self.spec.remote_image_keys.items()
+        }
+        if self.spec.remote_image_container_key is None:
+            payload.update(image_payload)
+        else:
+            payload[self.spec.remote_image_container_key] = image_payload
         return payload

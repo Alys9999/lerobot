@@ -20,7 +20,11 @@ from pathlib import Path
 
 import numpy as np
 
-from lerobot.envs.configs import LiberoEnv
+from lerobot.adapters.openpi_jax import OpenPIJaxLiberoSpec
+from lerobot.envs.configs import AlohaEnv, LiberoEnv
+from lerobot.envs.utils import preprocess_observation
+from lerobot.runtime.contracts import ObservationPacket, PolicyRequest, RobotSpec, RuntimeSpec, TaskSpec
+from lerobot.adapters.openpi_jax.output_codec_libero import OpenPIJaxLiberoOutputCodec
 from lerobot.scripts import lerobot_openpi_bowl_smoke as smoke
 
 
@@ -49,6 +53,15 @@ def _make_observation_batch() -> dict[str, object]:
             "image2": np.ones((1, 8, 8, 3), dtype=np.uint8),
         },
         "robot_state": _make_robot_state_batch(),
+    }
+
+
+def _make_aloha_observation_batch() -> dict[str, object]:
+    return {
+        "pixels": {
+            "top": np.full((1, 8, 8, 3), 64, dtype=np.uint8),
+        },
+        "agent_pos": np.zeros((1, 14), dtype=np.float32),
     }
 
 
@@ -124,6 +137,88 @@ class _FakeVecEnv:
         return None
 
 
+class _FakeAlohaSingleEnv:
+    metadata = {"render_fps": 50}
+
+    def __init__(self):
+        self.task = "AlohaTransferCube-v0"
+        self.last_variation_sample = {}
+        self._step = 0
+
+    def reset(self, seed=None):
+        self._step = 0
+        return _make_aloha_observation_batch(), {}
+
+    def render(self):
+        return np.full((8, 8, 3), 200, dtype=np.uint8)
+
+    def step(self, _action):
+        self._step += 1
+        done = self._step >= 2
+        info = {"is_success": np.array([done])}
+        if done:
+            info["final_info"] = {"is_success": np.array([True])}
+        return (
+            _make_aloha_observation_batch(),
+            np.array([1.0], dtype=np.float32),
+            np.array([done]),
+            np.array([False]),
+            info,
+        )
+
+
+class _FakeAlohaVecEnv:
+    def __init__(self):
+        self.envs = [_FakeAlohaSingleEnv()]
+        self.num_envs = 1
+
+    def reset(self, seed=None):
+        return self.envs[0].reset(seed=seed)
+
+    def step(self, action):
+        return self.envs[0].step(action)
+
+    def call(self, attr_name):
+        return [getattr(self.envs[0], attr_name)]
+
+    def close(self) -> None:
+        return None
+
+
+class _RecordingPolicyClient:
+    def __init__(self, _cfg):
+        self.server_metadata = {"server": "recording"}
+        self.requests: list[dict[str, object]] = []
+
+    def infer(self, observation):
+        self.requests.append(observation)
+        actions = np.arange(10 * 32, dtype=np.float32).reshape(10, 32)
+        return {"actions": actions}
+
+    def reset(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
+class _RecordingAlohaPolicyClient:
+    def __init__(self, _cfg):
+        self.server_metadata = {"server": "recording_aloha"}
+        self.requests: list[dict[str, object]] = []
+
+    def infer(self, observation):
+        self.requests.append(observation)
+        actions = np.arange(50 * 14, dtype=np.float32).reshape(50, 14)
+        return {"actions": actions}
+
+    def reset(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
 def test_run_bowl_smoke_writes_summary_and_trace(tmp_path, monkeypatch):
     monkeypatch.setattr(
         smoke,
@@ -188,3 +283,284 @@ def test_run_bowl_smoke_supports_multiple_tasks_with_variation(tmp_path, monkeyp
     assert summary["episodes"][1]["variation"]
     assert Path(summary["episodes"][0]["trace_path"]).exists()
     assert Path(summary["episodes"][1]["trace_path"]).exists()
+
+
+def test_libero_env_gym_kwargs_include_camera_mapping():
+    cfg = LiberoEnv(
+        task="libero_spatial",
+        task_ids=[0],
+        camera_name_mapping={
+            "agentview_image": "base_0_rgb",
+            "robot0_eye_in_hand_image": "left_wrist_0_rgb",
+        },
+    )
+
+    assert cfg.gym_kwargs["camera_name_mapping"] == {
+        "agentview_image": "base_0_rgb",
+        "robot0_eye_in_hand_image": "left_wrist_0_rgb",
+    }
+
+
+def test_ensure_smoke_runtime_ready_sets_headless_mujoco_defaults_for_aloha(monkeypatch):
+    monkeypatch.delenv("MUJOCO_GL", raising=False)
+    monkeypatch.delenv("PYOPENGL_PLATFORM", raising=False)
+    monkeypatch.delenv("DISPLAY", raising=False)
+
+    smoke.ensure_smoke_runtime_ready(AlohaEnv(task="AlohaTransferCube-v0"))
+
+    assert smoke.os.environ["MUJOCO_GL"] == "egl"
+    assert smoke.os.environ["PYOPENGL_PLATFORM"] == "egl"
+
+
+def test_processed_observation_and_codec_honor_configurable_contract():
+    spec = OpenPIJaxLiberoSpec(
+        model_id="custom_pi05_contract",
+        robot_id="widowx_250",
+        embodiment_id="widowx",
+        backend_id="mujoco",
+        packet_image_keys={
+            "base": "observation.images.image",
+            "left": "observation.images.image2",
+            "right": "observation.images.image2",
+        },
+        remote_image_keys={
+            "base": "observation/images/base_0_rgb",
+            "left": "observation/images/left_wrist_0_rgb",
+            "right": "observation/images/right_wrist_0_rgb",
+        },
+        state_packet_key="libero_state_32d",
+        state_remote_key="observation/state_32d",
+        state_dim=32,
+        action_dim=7,
+        action_horizon=10,
+        server_action_dim=32,
+        output_action_indices=[0, 1, 2, 3, 4, 5, 6],
+    )
+    observation_cfg = smoke.SmokeObservationAdapterConfig(
+        image_flip=False,
+        state_components=["eef_pos", "eef_quat", "gripper_qpos", "joints_pos", "joints_vel", "eef_mat"],
+    )
+    env_cfg = LiberoEnv(task="libero_spatial", task_ids=[0], autoreset_on_done=False)
+
+    preprocessed = preprocess_observation(_make_observation_batch())
+    processed = smoke.make_smoke_env_preprocessor(
+        env_cfg,
+        spec=spec,
+        observation_cfg=observation_cfg,
+    )(preprocessed)
+    packet = smoke.processed_observation_to_packet(
+        processed,
+        suite_name="libero_spatial",
+        task_id=0,
+        episode_index=0,
+        step_id=0,
+        task_text="pick up the bowl",
+        spec=spec,
+    )
+
+    assert packet.robot_id == "widowx_250"
+    assert packet.embodiment_id == "widowx"
+    assert packet.backend_id == "mujoco"
+    assert sorted(packet.images) == ["base", "left", "right"]
+    assert packet.robot_state["libero_state_32d"].shape == (32,)
+
+    codec = OpenPIJaxLiberoOutputCodec(spec)
+    req = PolicyRequest(
+        observation=ObservationPacket(
+            timestamp=0.0,
+            episode_id="ep0",
+            step_id=0,
+            images=packet.images,
+            robot_state=packet.robot_state,
+            task_text="pick up the bowl",
+            task_id="0",
+            robot_id=packet.robot_id,
+            embodiment_id=packet.embodiment_id,
+            backend_id=packet.backend_id,
+        ),
+        robot_spec=RobotSpec(robot_id="widowx_250", action_dim=7, camera_keys=("base", "left", "right")),
+        task_spec=TaskSpec(task_suite="libero_spatial", task_id="0", prompt="pick up the bowl"),
+        runtime_spec=RuntimeSpec(control_dt=1 / 30, max_steps=10),
+    )
+    raw_actions = np.arange(10 * 32, dtype=np.float32).reshape(10, 32)
+    decoded = codec.decode({"actions": raw_actions}, req)
+
+    assert decoded.values.shape == (10, 7)
+    np.testing.assert_array_equal(decoded.values, raw_actions[:, :7])
+
+
+def test_run_bowl_smoke_uses_configurable_policy_contract(tmp_path, monkeypatch):
+    client = _RecordingPolicyClient(None)
+    monkeypatch.setattr(
+        smoke,
+        "make_openpi_jax_client",
+        lambda _cfg, *, action_dim, action_horizon: client,
+    )
+    monkeypatch.setattr(
+        smoke,
+        "make_single_task_vec_env",
+        lambda env_cfg: ("libero_spatial", env_cfg.task_ids[0], _FakeVecEnv(task_id=env_cfg.task_ids[0])),
+    )
+
+    cfg = smoke.OpenPIBowlSmokeConfig(
+        policy_spec=OpenPIJaxLiberoSpec(
+            model_id="custom_pi05_contract",
+            robot_id="widowx_250",
+            embodiment_id="widowx",
+            backend_id="mujoco",
+            packet_image_keys={
+                "base": "observation.images.image",
+                "left": "observation.images.image2",
+                "right": "observation.images.image2",
+            },
+            remote_image_keys={
+                "base": "observation/images/base_0_rgb",
+                "left": "observation/images/left_wrist_0_rgb",
+                "right": "observation/images/right_wrist_0_rgb",
+            },
+            state_packet_key="libero_state_32d",
+            state_remote_key="observation/state_32d",
+            state_dim=32,
+            action_dim=7,
+            action_horizon=10,
+            server_action_dim=32,
+            output_action_indices=[0, 1, 2, 3, 4, 5, 6],
+        ),
+        observation=smoke.SmokeObservationAdapterConfig(
+            image_flip=False,
+            state_components=["eef_pos", "eef_quat", "gripper_qpos", "joints_pos", "joints_vel", "eef_mat"],
+        ),
+        env=LiberoEnv(task="libero_spatial", task_ids=[0], autoreset_on_done=False),
+        runtime=smoke.SmokeRuntimeConfig(
+            n_episodes=1,
+            max_steps=5,
+            output_dir=str(tmp_path),
+            write_video=False,
+        ),
+    )
+
+    summary = smoke.run_bowl_smoke(cfg)
+
+    assert summary["success_rate"] == 1.0
+    assert client.requests
+    first_request = client.requests[0]
+    assert sorted(first_request) == [
+        "observation/images/base_0_rgb",
+        "observation/images/left_wrist_0_rgb",
+        "observation/images/right_wrist_0_rgb",
+        "observation/state_32d",
+        "prompt",
+    ]
+    assert np.asarray(first_request["observation/state_32d"]).shape == (32,)
+
+
+def test_run_bowl_smoke_supports_aloha_arm_contract(tmp_path, monkeypatch):
+    client = _RecordingAlohaPolicyClient(None)
+    monkeypatch.setattr(
+        smoke,
+        "make_openpi_jax_client",
+        lambda _cfg, *, action_dim, action_horizon: client,
+    )
+    monkeypatch.setattr(
+        smoke,
+        "make_single_task_vec_env",
+        lambda env_cfg: ("aloha", 0, _FakeAlohaVecEnv()),
+    )
+
+    cfg = smoke.OpenPIBowlSmokeConfig(
+        policy_spec=OpenPIJaxLiberoSpec(
+            model_id="openpi_jax_pi05_aloha",
+            env_type="aloha",
+            robot_id="aloha",
+            embodiment_id="aloha",
+            backend_id="gym_aloha",
+            packet_image_keys={"cam_high": "observation.images.top"},
+            remote_image_keys={"cam_high": "cam_high"},
+            state_observation_key="observation.state",
+            state_packet_key="state",
+            state_remote_key="state",
+            state_dim=14,
+            remote_image_container_key="images",
+            remote_image_layout="chw",
+            prompt_required=False,
+            action_space="env_native_14d",
+            action_dim=14,
+            action_horizon=50,
+        ),
+        env=AlohaEnv(task="AlohaTransferCube-v0", obs_type="pixels_agent_pos", render_mode="rgb_array"),
+        runtime=smoke.SmokeRuntimeConfig(
+            n_episodes=1,
+            max_steps=5,
+            output_dir=str(tmp_path),
+            write_video=False,
+        ),
+    )
+
+    summary = smoke.run_bowl_smoke(cfg)
+
+    assert summary["success_rate"] == 1.0
+    assert client.requests
+    first_request = client.requests[0]
+    assert sorted(first_request) == ["images", "prompt", "state"]
+    assert sorted(first_request["images"]) == ["cam_high"]
+    assert np.asarray(first_request["images"]["cam_high"]).shape == (3, 8, 8)
+    assert np.asarray(first_request["state"]).shape == (14,)
+
+
+def test_run_bowl_smoke_supports_aloha_policy_on_libero_bench(tmp_path, monkeypatch):
+    client = _RecordingAlohaPolicyClient(None)
+    monkeypatch.setattr(
+        smoke,
+        "make_openpi_jax_client",
+        lambda _cfg, *, action_dim, action_horizon: client,
+    )
+    monkeypatch.setattr(
+        smoke,
+        "make_single_task_vec_env",
+        lambda env_cfg: ("libero_spatial", env_cfg.task_ids[0], _FakeVecEnv(task_id=env_cfg.task_ids[0])),
+    )
+
+    cfg = smoke.OpenPIBowlSmokeConfig(
+        policy_spec=OpenPIJaxLiberoSpec(
+            model_id="openpi_jax_pi05_aloha",
+            env_type="aloha",
+            robot_id="aloha",
+            embodiment_id="aloha",
+            backend_id="gym_aloha",
+            packet_image_keys={"cam_high": "observation.images.image"},
+            remote_image_keys={"cam_high": "cam_high"},
+            state_observation_key="observation.state",
+            state_packet_key="state",
+            state_remote_key="state",
+            state_dim=14,
+            remote_image_container_key="images",
+            remote_image_layout="chw",
+            prompt_required=False,
+            action_space="env_native_7d",
+            action_dim=7,
+            action_horizon=50,
+            server_action_dim=14,
+            output_action_indices=[0, 1, 2, 3, 4, 5, 6],
+        ),
+        observation=smoke.SmokeObservationAdapterConfig(
+            image_flip=True,
+            state_components=["eef_pos", "joints_pos", "gripper_qpos", "gripper_qvel"],
+        ),
+        env=LiberoEnv(task="libero_spatial", task_ids=[0], autoreset_on_done=False),
+        runtime=smoke.SmokeRuntimeConfig(
+            n_episodes=1,
+            max_steps=5,
+            output_dir=str(tmp_path),
+            write_video=False,
+        ),
+    )
+
+    summary = smoke.run_bowl_smoke(cfg)
+
+    assert summary["success_rate"] == 1.0
+    assert client.requests
+    first_request = client.requests[0]
+    assert sorted(first_request) == ["images", "prompt", "state"]
+    assert sorted(first_request["images"]) == ["cam_high"]
+    assert np.asarray(first_request["images"]["cam_high"]).shape == (3, 8, 8)
+    assert np.asarray(first_request["state"]).shape == (14,)

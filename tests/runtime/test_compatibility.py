@@ -68,6 +68,14 @@ def test_validate_openpi_jax_policy_request_rejects_bad_state_dim():
         validate_openpi_jax_policy_request(request, OpenPIJaxLiberoSpec())
 
 
+def test_validate_openpi_jax_policy_request_rejects_robot_metadata_mismatch():
+    request = _make_request()
+    request.observation.robot_id = "widowx_250"
+
+    with pytest.raises(CompatibilityError, match="Observation robot_id"):
+        validate_openpi_jax_policy_request(request, OpenPIJaxLiberoSpec())
+
+
 def test_validate_action_command_for_spec_rejects_bad_horizon():
     action = ActionCommand(
         action_space="env_native_7d",

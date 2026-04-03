@@ -16,6 +16,7 @@
 
 import json
 import logging
+import os
 import sys
 import time
 from collections import deque
@@ -33,10 +34,10 @@ from lerobot.adapters.openpi_jax import (
     make_openpi_jax_client,
 )
 from lerobot.configs import parser
-from lerobot.envs.configs import LiberoEnv
+from lerobot.envs.configs import EnvConfig, LiberoEnv
 from lerobot.envs.libero_bootstrap import ensure_libero_runtime_ready
 from lerobot.envs.factory import make_env
-from lerobot.envs.utils import add_envs_task, preprocess_observation
+from lerobot.envs.utils import add_envs_task, env_to_policy_features, preprocess_observation
 from lerobot.processor.env_processor import LiberoProcessorStep
 from lerobot.processor.pipeline import PolicyProcessorPipeline
 from lerobot.runtime.contracts import (
@@ -54,6 +55,7 @@ from lerobot.utils.import_utils import register_third_party_plugins
 from lerobot.utils.io_utils import write_video
 from lerobot.utils.random_utils import set_seed
 from lerobot.utils.utils import init_logging
+from lerobot.utils.constants import ACTION
 
 LOGGER = logging.getLogger(__name__)
 
@@ -78,9 +80,18 @@ class SmokeRuntimeConfig:
 
 
 @dataclass(slots=True)
+class SmokeObservationAdapterConfig:
+    image_flip: bool = True
+    state_components: list[str] = field(
+        default_factory=lambda: ["eef_pos", "eef_axis_angle", "gripper_qpos"]
+    )
+
+
+@dataclass(slots=True)
 class OpenPIBowlSmokeConfig:
     policy: OpenPIJaxClientConfig = field(default_factory=OpenPIJaxClientConfig)
-    env: LiberoEnv = field(
+    policy_spec: OpenPIJaxLiberoSpec = field(default_factory=OpenPIJaxLiberoSpec)
+    env: EnvConfig = field(
         default_factory=lambda: LiberoEnv(
             task="libero_object",
             task_ids=None,
@@ -90,6 +101,7 @@ class OpenPIBowlSmokeConfig:
             autoreset_on_done=False,
         )
     )
+    observation: SmokeObservationAdapterConfig = field(default_factory=SmokeObservationAdapterConfig)
     bowl_task_resolver: BowlTaskResolverConfig = field(default_factory=BowlTaskResolverConfig)
     variation: VariationConfig = field(default_factory=VariationConfig)
     runtime: SmokeRuntimeConfig = field(default_factory=SmokeRuntimeConfig)
@@ -103,7 +115,7 @@ class SmokeEpisodeArtifacts:
 
 @dataclass(slots=True, frozen=True)
 class ResolvedSmokeTask:
-    env_cfg: LiberoEnv
+    env_cfg: EnvConfig
     suite_name: str
     task_id: int
     task_name: str | None = None
@@ -182,7 +194,18 @@ def _normalize_task_ids(task_ids: list[int] | None) -> list[int]:
     return normalized
 
 
-def resolve_smoke_tasks(env_cfg: LiberoEnv, resolver_cfg: BowlTaskResolverConfig) -> list[ResolvedSmokeTask]:
+def resolve_smoke_tasks(env_cfg: EnvConfig, resolver_cfg: BowlTaskResolverConfig) -> list[ResolvedSmokeTask]:
+    if env_cfg.type != "libero":
+        return [
+            ResolvedSmokeTask(
+                env_cfg=env_cfg,
+                suite_name=env_cfg.type,
+                task_id=0,
+                task_name=env_cfg.task,
+                task_prompt=env_cfg.task,
+            )
+        ]
+
     normalized_task_ids = _normalize_task_ids(env_cfg.task_ids)
     if normalized_task_ids:
         return [
@@ -232,6 +255,16 @@ def resolve_smoke_tasks(env_cfg: LiberoEnv, resolver_cfg: BowlTaskResolverConfig
     return matched_tasks
 
 
+def ensure_smoke_runtime_ready(env_cfg: EnvConfig) -> None:
+    if env_cfg.type == "libero":
+        ensure_libero_runtime_ready()
+        return
+
+    if env_cfg.type == "aloha" and not os.environ.get("DISPLAY"):
+        os.environ.setdefault("MUJOCO_GL", "egl")
+        os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
+
+
 def make_single_task_vec_env(env_cfg: LiberoEnv):
     envs = make_env(env_cfg, n_envs=1, use_async_envs=False)
     if len(envs) != 1:
@@ -244,10 +277,66 @@ def make_single_task_vec_env(env_cfg: LiberoEnv):
     return suite_name, task_id, task_map[task_id]
 
 
-def make_smoke_env_preprocessor(env_cfg: LiberoEnv) -> PolicyProcessorPipeline[dict[str, Any], dict[str, Any]]:
+def make_smoke_env_preprocessor(
+    env_cfg: EnvConfig,
+    *,
+    spec: OpenPIJaxLiberoSpec,
+    observation_cfg: SmokeObservationAdapterConfig,
+) -> PolicyProcessorPipeline[dict[str, Any], dict[str, Any]]:
+    if env_cfg.type == "libero":
+        libero_step = LiberoProcessorStep(
+            image_flip=observation_cfg.image_flip,
+            state_components=observation_cfg.state_components,
+            state_output_key=spec.state_observation_key,
+        )
+        if libero_step.state_dim != spec.state_dim:
+            raise ValueError(
+                "LIBERO smoke observation config does not match policy_spec.state_dim. "
+                f"Got state_components={observation_cfg.state_components} -> {libero_step.state_dim} dims, "
+                f"but policy_spec.state_dim={spec.state_dim}."
+            )
+        return PolicyProcessorPipeline(steps=[libero_step])
+
+    return PolicyProcessorPipeline(steps=[])
+
+
+def validate_smoke_contract(
+    env_cfg: EnvConfig,
+    *,
+    spec: OpenPIJaxLiberoSpec,
+) -> None:
+    policy_features = env_to_policy_features(env_cfg)
+    action_feature = policy_features.get(ACTION)
+    if action_feature is None:
+        raise ValueError(f"Env type '{env_cfg.type}' does not expose an action feature.")
+    env_action_dim = int(action_feature.shape[0])
+    if env_action_dim != spec.action_dim:
+        raise ValueError(
+            "policy_spec.action_dim does not match the environment action space. "
+            f"Got env action dim {env_action_dim} and policy_spec.action_dim={spec.action_dim}."
+        )
+
+    missing_packet_sources = [
+        source_key for source_key in spec.packet_image_keys.values() if source_key not in policy_features
+    ]
+    if missing_packet_sources:
+        raise ValueError(
+            "policy_spec.packet_image_keys references observation keys that the environment does not expose. "
+            f"Missing keys: {missing_packet_sources}."
+        )
+
     if env_cfg.type != "libero":
-        raise ValueError(f"OpenPI bowl smoke only supports LIBERO, got env type '{env_cfg.type}'.")
-    return PolicyProcessorPipeline(steps=[LiberoProcessorStep()])
+        state_feature = policy_features.get(spec.state_observation_key)
+        if state_feature is None:
+            raise ValueError(
+                f"Env type '{env_cfg.type}' does not expose state key {spec.state_observation_key!r}."
+            )
+        env_state_dim = int(state_feature.shape[0])
+        if env_state_dim != spec.state_dim:
+            raise ValueError(
+                "policy_spec.state_dim does not match the environment state dimension. "
+                f"Got env state dim {env_state_dim} and policy_spec.state_dim={spec.state_dim}."
+            )
 
 
 def capture_smoke_frame(vec_env: Any) -> np.ndarray:
@@ -294,9 +383,9 @@ def processed_observation_to_packet(
         robot_state={spec.state_packet_key: state},
         task_text=task_text,
         task_id=str(task_id),
-        robot_id="franka_panda",
-        embodiment_id="libero",
-        backend_id="mujoco",
+        robot_id=spec.robot_id,
+        embodiment_id=spec.embodiment_id,
+        backend_id=spec.backend_id,
         prev_action=prev_action,
     )
 
@@ -321,8 +410,8 @@ def run_smoke_episode(
     seed = runtime_cfg.seed + episode_index
     observation, _info = vec_env.reset(seed=seed)
     video_frames = [capture_smoke_frame(vec_env)] if record_video else []
-    current_task_prompt = task_prompt or getattr(vec_env.envs[0], "task_description", "") or ""
     current_task_name = task_name or getattr(vec_env.envs[0], "task", "") or ""
+    current_task_prompt = task_prompt or getattr(vec_env.envs[0], "task_description", "") or current_task_name
     variation = dict(getattr(vec_env.envs[0], "last_variation_sample", {}))
 
     trace = EpisodeTrace(
@@ -337,7 +426,7 @@ def run_smoke_episode(
     )
 
     robot_spec = RobotSpec(
-        robot_id="franka_panda",
+        robot_id=spec.robot_id,
         action_dim=spec.action_dim,
         camera_keys=tuple(spec.required_image_keys),
     )
@@ -413,12 +502,14 @@ def run_smoke_episode(
 
 def run_bowl_smoke(cfg: OpenPIBowlSmokeConfig) -> dict[str, Any]:
     set_seed(cfg.runtime.seed)
+    ensure_smoke_runtime_ready(cfg.env)
+    validate_smoke_contract(cfg.env, spec=cfg.policy_spec)
     resolved_tasks = resolve_smoke_tasks(cfg.env, cfg.bowl_task_resolver)
     variation_profile = build_variation_profile(cfg.variation)
     output_dir = Path(cfg.runtime.output_dir)
     traces_dir = output_dir / "traces"
     videos_dir = output_dir / "videos"
-    spec = OpenPIJaxLiberoSpec()
+    spec = cfg.policy_spec
     adapter = OpenPIJaxAdapter(
         make_openpi_jax_client(cfg.policy, action_dim=spec.action_dim, action_horizon=spec.action_horizon),
         spec=spec,
@@ -432,7 +523,11 @@ def run_bowl_smoke(cfg: OpenPIBowlSmokeConfig) -> dict[str, Any]:
             suite_name, task_id, vec_env = make_single_task_vec_env(resolved_task.env_cfg)
             resolved_task_name = resolved_task.task_name or getattr(vec_env.envs[0], "task", None)
             resolved_task_prompt = resolved_task.task_prompt or getattr(vec_env.envs[0], "task_description", None)
-            env_preprocessor = make_smoke_env_preprocessor(resolved_task.env_cfg)
+            env_preprocessor = make_smoke_env_preprocessor(
+                resolved_task.env_cfg,
+                spec=spec,
+                observation_cfg=cfg.observation,
+            )
             task_episode_summaries: list[dict[str, Any]] = []
 
             try:
@@ -540,7 +635,7 @@ def run_bowl_smoke(cfg: OpenPIBowlSmokeConfig) -> dict[str, Any]:
         output_dir.mkdir(parents=True, exist_ok=True)
         with (output_dir / "summary.json").open("w", encoding="utf-8") as handle:
             json.dump(summary, handle, indent=2)
-        LOGGER.info("OpenPI bowl smoke complete. success_rate=%.2f", success_rate)
+        LOGGER.info("OpenPI smoke complete. success_rate=%.2f", success_rate)
         return summary
     finally:
         adapter.close()

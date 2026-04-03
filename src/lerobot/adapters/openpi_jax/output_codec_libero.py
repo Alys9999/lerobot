@@ -33,19 +33,28 @@ class OpenPIJaxLiberoOutputCodec:
         if "actions" not in model_output:
             raise ValueError("OpenPI JAX output did not contain the required 'actions' key.")
 
-        values = np.asarray(model_output["actions"], dtype=np.float32)
-        if values.ndim == 1:
-            values = values.reshape(1, -1)
-        if values.ndim != 2:
-            raise ValueError(f"Expected action chunk with shape (H, D), got {values.shape}.")
-        if values.shape[0] != self.spec.action_horizon:
-            raise ValueError(f"Expected action horizon {self.spec.action_horizon}, got {values.shape[0]}.")
-        if values.shape[1] < self.spec.action_dim:
+        raw_values = np.asarray(model_output["actions"], dtype=np.float32)
+        if raw_values.ndim == 1:
+            raw_values = raw_values.reshape(1, -1)
+        if raw_values.ndim != 2:
+            raise ValueError(f"Expected action chunk with shape (H, D), got {raw_values.shape}.")
+        if raw_values.shape[0] != self.spec.action_horizon:
+            raise ValueError(f"Expected action horizon {self.spec.action_horizon}, got {raw_values.shape[0]}.")
+
+        required_raw_dim = self.spec.server_action_dim or self.spec.action_dim
+        if self.spec.output_action_indices:
+            required_raw_dim = max(required_raw_dim, max(self.spec.output_action_indices) + 1)
+
+        if raw_values.shape[1] < required_raw_dim:
             raise ValueError(
-                f"Expected action dim >= {self.spec.action_dim}, got action chunk with shape {values.shape}."
+                "OpenPI JAX output is narrower than the configured action contract. "
+                f"Expected raw action dim >= {required_raw_dim}, got action chunk with shape {raw_values.shape}."
             )
 
-        values = np.ascontiguousarray(values[:, : self.spec.action_dim])
+        if self.spec.output_action_indices:
+            values = np.ascontiguousarray(raw_values[:, self.spec.output_action_indices])
+        else:
+            values = np.ascontiguousarray(raw_values[:, : self.spec.action_dim])
         return ActionCommand(
             action_space=self.spec.action_space,
             values=values,
@@ -54,5 +63,6 @@ class OpenPIJaxLiberoOutputCodec:
             metadata={
                 "model_id": self.spec.model_id,
                 "raw_action_shape": list(np.asarray(model_output["actions"]).shape),
+                "output_action_indices": list(self.spec.output_action_indices),
             },
         )

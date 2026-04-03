@@ -5,21 +5,25 @@ This guide collects the environment preparation, install, checkpoint download, a
 ## Repos
 
 - LeRobot repo: `/workspace/lerobot`
-- OpenPI repo: `/workspace/openpi`
+- OpenPI repo: `/workspace/openpi/openpi`
 
 ## 1. Prepare Environments
 
-OpenPI uses its own `uv` environment:
+OpenPI uses its own `uv` environment pinned to Python 3.12:
 
 ```bash
-cd /workspace/openpi
+cd /workspace/openpi/openpi
+uv python install 3.12
+uv venv --python 3.12
 uv sync
 ```
 
-LeRobot needs the LIBERO and OpenPI client extras for this flow:
+LeRobot needs its own Python 3.12 `uv` environment plus the LIBERO and OpenPI client extras for this flow:
 
 ```bash
 cd /workspace/lerobot
+uv python install 3.12
+uv venv --python 3.12
 uv sync --extra libero --extra openpi-client-dep
 ```
 
@@ -35,12 +39,12 @@ for m in mods:
 PY
 ```
 
-## 2. Download the OpenPI LIBERO Checkpoint
+## 2. Download the OpenPI JAX LIBERO Checkpoint
 
-Download the official OpenPI LIBERO fine-tuned checkpoint:
+Download the official OpenPI JAX LIBERO fine-tuned checkpoint:
 
 ```bash
-cd /workspace/openpi
+cd /workspace/openpi/openpi
 uv run python -u - <<'PY'
 from openpi.shared.download import maybe_download
 path = maybe_download("gs://openpi-assets/checkpoints/pi05_libero")
@@ -59,7 +63,7 @@ The downloaded local path is:
 Run the server with the downloaded checkpoint:
 
 ```bash
-cd /workspace/openpi
+cd /workspace/openpi/openpi
 uv run scripts/serve_policy.py \
   --port 8000 \
   policy:checkpoint \
@@ -130,7 +134,7 @@ Key artifacts:
 Check that the OpenPI environment has the required packages:
 
 ```bash
-cd /workspace/openpi
+cd /workspace/openpi/openpi
 uv run python - <<'PY'
 import importlib.util
 mods = ["openpi", "openpi_client", "lerobot", "msgpack", "websockets.sync.client"]

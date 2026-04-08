@@ -58,11 +58,11 @@ def validate_openpi_jax_policy_request(req: PolicyRequest, spec: Any) -> None:
     state = np.asarray(obs.robot_state[spec.state_packet_key], dtype=np.float32).reshape(-1)
     _require(
         state.shape[0] == spec.state_dim,
-        f"Expected {spec.state_dim}D LIBERO state, got {state.shape[0]}.",
+        f"Expected state dim {spec.state_dim}, got {state.shape[0]}.",
     )
 
     if spec.prompt_required:
-        _require(bool(obs.task_text and obs.task_text.strip()), "Prompt is required for OpenPI JAX LIBERO.")
+        _require(bool(obs.task_text and obs.task_text.strip()), "Prompt is required for OpenPI JAX requests.")
 
     _require(
         req.robot_spec.robot_id == spec.robot_id,

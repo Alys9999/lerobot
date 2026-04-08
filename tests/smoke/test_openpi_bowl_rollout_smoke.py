@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -54,6 +55,12 @@ def _make_observation_batch() -> dict[str, object]:
         },
         "robot_state": _make_robot_state_batch(),
     }
+
+
+def _make_observation_batch_with_eef(*, eef_pos: tuple[float, float, float]) -> dict[str, object]:
+    observation = _make_observation_batch()
+    observation["robot_state"]["eef"]["pos"] = np.asarray([eef_pos], dtype=np.float32)
+    return observation
 
 
 def _make_aloha_observation_batch() -> dict[str, object]:
@@ -122,6 +129,134 @@ class _FakeSingleEnv:
 class _FakeVecEnv:
     def __init__(self, task_id: int = 0):
         self.envs = [_FakeSingleEnv(task_id=task_id)]
+        self.num_envs = 1
+
+    def reset(self, seed=None):
+        return self.envs[0].reset(seed=seed)
+
+    def step(self, action):
+        return self.envs[0].step(action)
+
+    def call(self, attr_name):
+        return [getattr(self.envs[0], attr_name)]
+
+    def close(self) -> None:
+        return None
+
+
+class _FakeAttemptSimModel:
+    nbody = 2
+
+    @staticmethod
+    def body_id2name(body_id: int) -> str:
+        return ["bowl_body", "table_body"][body_id]
+
+
+class _FakeAttemptSimData:
+    def __init__(self, env: "_FakeAttemptSingleEnv"):
+        self._env = env
+
+    @property
+    def body_xpos(self) -> np.ndarray:
+        bowl_position = self._env.current_state["bowl_position"]
+        table_position = np.zeros(3, dtype=np.float32)
+        return np.asarray([bowl_position, table_position], dtype=np.float32)
+
+
+class _FakeAttemptSim:
+    def __init__(self, env: "_FakeAttemptSingleEnv"):
+        self.model = _FakeAttemptSimModel()
+        self.data = _FakeAttemptSimData(env)
+
+
+class _FakeAttemptSingleEnv:
+    metadata = {"render_fps": 30}
+
+    def __init__(self, task_id: int = 0):
+        self.task = f"pick_up_the_bowl_{task_id}"
+        self.task_description = f"pick up the bowl task {task_id}"
+        self.task_id = task_id
+        self.last_variation_sample = {}
+        self._profile = None
+        self._rng = np.random.default_rng(0)
+        self._step = 0
+        self._states = [
+            {
+                "eef_pos": (0.25, 0.0, 0.0),
+                "bowl_position": np.array([0.0, 0.0, 0.0], dtype=np.float32),
+                "done": False,
+                "success": False,
+            },
+            {
+                "eef_pos": (0.015, 0.0, 0.022),
+                "bowl_position": np.array([0.03, 0.0, 0.02], dtype=np.float32),
+                "done": False,
+                "success": False,
+            },
+            {
+                "eef_pos": (0.22, 0.0, 0.0),
+                "bowl_position": np.array([0.0, 0.0, 0.0], dtype=np.float32),
+                "done": False,
+                "success": False,
+            },
+            {
+                "eef_pos": (0.012, 0.0, 0.02),
+                "bowl_position": np.array([0.04, 0.0, 0.02], dtype=np.float32),
+                "done": False,
+                "success": False,
+            },
+            {
+                "eef_pos": (0.01, 0.0, 0.03),
+                "bowl_position": np.array([0.08, 0.0, 0.03], dtype=np.float32),
+                "done": True,
+                "success": True,
+            },
+        ]
+        self.sim = _FakeAttemptSim(self)
+
+    @property
+    def current_state(self) -> dict[str, object]:
+        return self._states[self._step]
+
+    def set_variation_profile(self, profile, seed=None):
+        self._profile = profile
+        if seed is not None:
+            self._rng = np.random.default_rng(seed)
+
+    def reset(self, seed=None):
+        self._step = 0
+        if seed is not None:
+            self._rng = np.random.default_rng(seed)
+        if self._profile is not None:
+            self.last_variation_sample = self._profile.sample_all(self._rng)
+        return _make_observation_batch_with_eef(eef_pos=self.current_state["eef_pos"]), {
+            "variation": dict(self.last_variation_sample)
+        }
+
+    def render(self):
+        return np.full((8, 8, 3), 90, dtype=np.uint8)
+
+    def step(self, _action):
+        self._step = min(self._step + 1, len(self._states) - 1)
+        done = bool(self.current_state["done"])
+        info = {
+            "is_success": np.array([self.current_state["success"]]),
+            "variation": np.array([dict(self.last_variation_sample)], dtype=object),
+        }
+        if done:
+            info["final_info"] = {"is_success": np.array([self.current_state["success"]])}
+        return (
+            _make_observation_batch_with_eef(eef_pos=self.current_state["eef_pos"]),
+            np.array([1.0], dtype=np.float32),
+            np.array([done]),
+            np.array([False]),
+            info,
+        )
+
+
+class _FakeAttemptVecEnv:
+    def __init__(self, task_id: int = 0):
+        self.envs = [_FakeAttemptSingleEnv(task_id=task_id)]
         self.num_envs = 1
 
     def reset(self, seed=None):
@@ -210,6 +345,23 @@ class _RecordingAlohaPolicyClient:
     def infer(self, observation):
         self.requests.append(observation)
         actions = np.arange(50 * 14, dtype=np.float32).reshape(50, 14)
+        return {"actions": actions}
+
+    def reset(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
+class _RecordingDroidPolicyClient:
+    def __init__(self, _cfg):
+        self.server_metadata = {"server": "recording_droid"}
+        self.requests: list[dict[str, object]] = []
+
+    def infer(self, observation):
+        self.requests.append(observation)
+        actions = np.arange(15 * 8, dtype=np.float32).reshape(15, 8)
         return {"actions": actions}
 
     def reset(self) -> None:
@@ -564,3 +716,120 @@ def test_run_bowl_smoke_supports_aloha_policy_on_libero_bench(tmp_path, monkeypa
     assert sorted(first_request["images"]) == ["cam_high"]
     assert np.asarray(first_request["images"]["cam_high"]).shape == (3, 8, 8)
     assert np.asarray(first_request["state"]).shape == (14,)
+
+
+def test_run_bowl_smoke_supports_droid_policy_contract_on_libero_bench(tmp_path, monkeypatch):
+    client = _RecordingDroidPolicyClient(None)
+    monkeypatch.setattr(
+        smoke,
+        "make_openpi_jax_client",
+        lambda _cfg, *, action_dim, action_horizon: client,
+    )
+    monkeypatch.setattr(
+        smoke,
+        "make_single_task_vec_env",
+        lambda env_cfg: ("libero_spatial", env_cfg.task_ids[0], _FakeVecEnv(task_id=env_cfg.task_ids[0])),
+    )
+
+    cfg = smoke.OpenPIBowlSmokeConfig(
+        policy_spec=OpenPIJaxLiberoSpec(
+            model_id="openpi_jax_pi05_droid",
+            env_type="droid",
+            robot_id="franka_panda",
+            embodiment_id="droid",
+            backend_id="droid",
+            packet_image_keys={
+                "base": "observation.images.image",
+                "left_wrist": "observation.images.image2",
+            },
+            remote_image_keys={
+                "base": "observation/exterior_image_1_left",
+                "left_wrist": "observation/wrist_image_left",
+            },
+            state_observation_key="observation.state",
+            state_packet_key="droid_state_8d",
+            state_remote_key=None,
+            state_remote_keys={
+                "observation/joint_position": [0, 1, 2, 3, 4, 5, 6],
+                "observation/gripper_position": [7],
+            },
+            state_dim=8,
+            action_space="env_native_7d",
+            action_dim=7,
+            action_horizon=15,
+            server_action_dim=8,
+            output_action_indices=[0, 1, 2, 3, 4, 5, 6],
+        ),
+        observation=smoke.SmokeObservationAdapterConfig(
+            image_flip=True,
+            state_components=["joints_pos", "gripper_position"],
+        ),
+        env=LiberoEnv(task="libero_spatial", task_ids=[0], autoreset_on_done=False),
+        runtime=smoke.SmokeRuntimeConfig(
+            n_episodes=1,
+            max_steps=5,
+            output_dir=str(tmp_path),
+            write_video=False,
+        ),
+    )
+
+    summary = smoke.run_bowl_smoke(cfg)
+
+    assert summary["success_rate"] == 1.0
+    assert client.requests
+    first_request = client.requests[0]
+    assert sorted(first_request) == [
+        "observation/exterior_image_1_left",
+        "observation/gripper_position",
+        "observation/joint_position",
+        "observation/wrist_image_left",
+        "prompt",
+    ]
+    assert np.asarray(first_request["observation/joint_position"]).shape == (7,)
+    assert np.asarray(first_request["observation/gripper_position"]).shape == (1,)
+
+
+def test_run_bowl_smoke_records_attempt_analysis_metrics_and_trace(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        smoke,
+        "make_openpi_jax_client",
+        lambda _cfg, *, action_dim, action_horizon: _FakePolicyClient(
+            (_cfg, action_dim, action_horizon)
+        ),
+    )
+    monkeypatch.setattr(
+        smoke,
+        "make_single_task_vec_env",
+        lambda env_cfg: ("libero_spatial", env_cfg.task_ids[0], _FakeAttemptVecEnv(task_id=env_cfg.task_ids[0])),
+    )
+
+    cfg = smoke.OpenPIBowlSmokeConfig(
+        env=LiberoEnv(task="libero_spatial", task_ids=[0], fps=10, autoreset_on_done=False),
+        attempt_analysis=smoke.BowlAttemptAnalysisConfig(
+            settle_grace_steps=1,
+            far_grace_steps=1,
+        ),
+        runtime=smoke.SmokeRuntimeConfig(
+            n_episodes=1,
+            max_steps=6,
+            output_dir=str(tmp_path),
+            write_video=False,
+        ),
+    )
+
+    summary = smoke.run_bowl_smoke(cfg)
+
+    episode_metrics = summary["episodes"][0]["metrics"]
+    assert episode_metrics["attempt_count"] == 2.0
+    assert episode_metrics["failed_attempt_count"] == 1.0
+    assert episode_metrics["successful_attempt_count"] == 1.0
+    assert np.isclose(episode_metrics["first_attempt_to_success_s"], 0.3)
+    assert np.isclose(episode_metrics["first_failure_to_success_s"], 0.2)
+
+    trace_path = Path(summary["episodes"][0]["trace_path"])
+    trace_summary = json.loads(trace_path.read_text(encoding="utf-8"))
+    attempt_analysis = trace_summary["metadata"]["attempt_analysis"]
+    assert attempt_analysis["enabled"] is True
+    assert attempt_analysis["signal_available"] is True
+    assert attempt_analysis["recovered_after_failure"] is True
+    assert [event["outcome"] for event in attempt_analysis["events"]] == ["failed", "succeeded"]

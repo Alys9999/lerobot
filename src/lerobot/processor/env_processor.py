@@ -39,6 +39,7 @@ class LiberoProcessorStep(ObservationProcessorStep):
         - End-effector position (3D)
         - End-effector quaternion converted to axis-angle (3D)
         - Gripper joint positions (2D)
+        - Optional scalar gripper position / velocity summaries (1D each)
     -   Maps the concatenated state to `"observation.state"`.
 
     **Image Processing:**
@@ -128,7 +129,10 @@ class LiberoProcessorStep(ObservationProcessorStep):
             "eef_axis_angle": self._quat2axisangle(eef["quat"]),
             "eef_mat": eef["mat"].reshape(eef["mat"].shape[0], -1),
             "gripper_qpos": gripper["qpos"],
+            # LIBERO exposes two gripper finger joints; DROID-style contracts want a single scalar.
+            "gripper_position": gripper["qpos"].mean(dim=-1, keepdim=True),
             "gripper_qvel": gripper["qvel"],
+            "gripper_velocity": gripper["qvel"].mean(dim=-1, keepdim=True),
             "joints_pos": joints["pos"],
             "joints_vel": joints["vel"],
         }
@@ -145,7 +149,9 @@ class LiberoProcessorStep(ObservationProcessorStep):
             "eef_axis_angle": 3,
             "eef_mat": 9,
             "gripper_qpos": 2,
+            "gripper_position": 1,
             "gripper_qvel": 2,
+            "gripper_velocity": 1,
             "joints_pos": 7,
             "joints_vel": 7,
         }
@@ -161,6 +167,10 @@ class LiberoProcessorStep(ObservationProcessorStep):
         aliases = {
             "eef_axisangle": "eef_axis_angle",
             "eef_rotvec": "eef_axis_angle",
+            "gripper_pos": "gripper_position",
+            "gripper_qpos_scalar": "gripper_position",
+            "gripper_vel": "gripper_velocity",
+            "gripper_qvel_scalar": "gripper_velocity",
             "joint_pos": "joints_pos",
             "joint_positions": "joints_pos",
             "joint_vel": "joints_vel",
@@ -173,7 +183,9 @@ class LiberoProcessorStep(ObservationProcessorStep):
             "eef_axis_angle",
             "eef_mat",
             "gripper_qpos",
+            "gripper_position",
             "gripper_qvel",
+            "gripper_velocity",
             "joints_pos",
             "joints_vel",
         }

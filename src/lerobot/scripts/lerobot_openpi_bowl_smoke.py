@@ -49,6 +49,7 @@ from lerobot.runtime.contracts import (
     RuntimeSpec,
     TaskSpec,
 )
+from lerobot.runtime.bowl_attempt_analysis import BowlAttemptAnalysisConfig, BowlAttemptAnalyzer
 from lerobot.runtime.trace import write_episode_trace
 from lerobot.runtime.variation import VariationConfig, build_variation_profile
 from lerobot.utils.import_utils import register_third_party_plugins
@@ -104,6 +105,7 @@ class OpenPIBowlSmokeConfig:
     observation: SmokeObservationAdapterConfig = field(default_factory=SmokeObservationAdapterConfig)
     bowl_task_resolver: BowlTaskResolverConfig = field(default_factory=BowlTaskResolverConfig)
     variation: VariationConfig = field(default_factory=VariationConfig)
+    attempt_analysis: BowlAttemptAnalysisConfig = field(default_factory=BowlAttemptAnalysisConfig)
     runtime: SmokeRuntimeConfig = field(default_factory=SmokeRuntimeConfig)
 
 
@@ -404,6 +406,7 @@ def run_smoke_episode(
     control_dt: float = 1 / 30,
     spec: OpenPIJaxLiberoSpec | None = None,
     record_video: bool = False,
+    attempt_analysis_cfg: BowlAttemptAnalysisConfig | None = None,
 ) -> SmokeEpisodeArtifacts:
     spec = spec or OpenPIJaxLiberoSpec()
     adapter.reset()
@@ -424,6 +427,10 @@ def run_smoke_episode(
             "action_chunk_shapes": [],
         }
     )
+    attempt_analyzer: BowlAttemptAnalyzer | None = None
+    if suite_name.startswith("libero") and hasattr(vec_env, "envs") and len(vec_env.envs) == 1:
+        attempt_analyzer = BowlAttemptAnalyzer(attempt_analysis_cfg)
+        attempt_analyzer.reset(vec_env.envs[0], observation)
 
     robot_spec = RobotSpec(
         robot_id=spec.robot_id,
@@ -478,6 +485,16 @@ def run_smoke_episode(
             video_frames.append(capture_smoke_frame(vec_env))
         reward_value = float(np.asarray(reward, dtype=np.float32).reshape(-1)[0])
         done = bool(np.asarray(terminated | truncated).reshape(-1)[0])
+        step_timestamp = float(step_id + 1) * float(control_dt)
+        step_success = done and _extract_success(info)
+        if attempt_analyzer is not None:
+            attempt_analyzer.update(
+                vec_env.envs[0],
+                observation,
+                step_id=step_id + 1,
+                timestamp=step_timestamp,
+                success=step_success,
+            )
 
         episode_return += reward_value
         trace.rewards.append(reward_value)
@@ -497,6 +514,14 @@ def run_smoke_episode(
         "avg_latency_ms": float(np.mean(latencies_ms)) if latencies_ms else 0.0,
         "max_latency_ms": float(np.max(latencies_ms)) if latencies_ms else 0.0,
     }
+    if attempt_analyzer is not None:
+        attempt_metrics, attempt_metadata = attempt_analyzer.finalize(
+            step_id=len(trace.rewards),
+            timestamp=float(len(trace.rewards)) * float(control_dt),
+            success=trace.success,
+        )
+        trace.metrics.update(attempt_metrics)
+        trace.metadata["attempt_analysis"] = attempt_metadata
     return SmokeEpisodeArtifacts(trace=trace, video_frames=video_frames)
 
 
@@ -552,6 +577,7 @@ def run_bowl_smoke(cfg: OpenPIBowlSmokeConfig) -> dict[str, Any]:
                             control_dt=1.0 / float(resolved_task.env_cfg.fps),
                             spec=adapter.spec,
                             record_video=cfg.runtime.write_video,
+                            attempt_analysis_cfg=cfg.attempt_analysis,
                         )
                     except Exception as exc:  # noqa: BLE001
                         if cfg.runtime.fail_fast:

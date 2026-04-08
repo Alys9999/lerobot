@@ -55,12 +55,15 @@ class OpenPIJaxLiberoInputCodec:
     def encode(self, req: PolicyRequest) -> dict[str, Any]:
         validate_openpi_jax_policy_request(req, self.spec)
         obs = req.observation
+        state = np.asarray(obs.robot_state[self.spec.state_packet_key], dtype=np.float32).reshape(-1)
         payload: dict[str, Any] = {
             self.spec.prompt_remote_key: obs.task_text,
-            self.spec.state_remote_key: np.asarray(
-                obs.robot_state[self.spec.state_packet_key], dtype=np.float32
-            ).reshape(-1),
         }
+        if self.spec.state_remote_keys:
+            for remote_key, indices in self.spec.state_remote_keys.items():
+                payload[remote_key] = np.ascontiguousarray(state[np.asarray(indices, dtype=np.int64)])
+        elif self.spec.state_remote_key is not None:
+            payload[self.spec.state_remote_key] = state
         image_payload = {
             remote_key: _to_remote_image(obs.images[alias], layout=self.spec.remote_image_layout)
             for alias, remote_key in self.spec.remote_image_keys.items()

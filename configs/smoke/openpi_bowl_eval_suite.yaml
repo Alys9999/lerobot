@@ -1,0 +1,33 @@
+openpi_repo_root: /workspace/openpi/openpi
+output_root: outputs/openpi_bowl_eval_suite
+host: 127.0.0.1
+port: 8000
+server_launcher: [uv, run, python]
+server_script_path: scripts/serve_policy.py
+request_timeout_s: 120.0
+startup_timeout_s: 300.0
+startup_poll_interval_s: 1.0
+shutdown_timeout_s: 20.0
+write_video: false
+write_trace: true
+compare_after_run: true
+continue_on_failure: true
+
+scenarios:
+  - name: aloha
+    enabled: true
+    smoke_config_path: configs/smoke/openpi_aloha_bowl_variation_smoke.yaml
+    server_policy_config: pi05_aloha
+    checkpoint_dir: gs://openpi-assets/checkpoints/pi05_aloha
+
+  - name: droid
+    enabled: true
+    smoke_config_path: configs/smoke/openpi_droid_bowl_variation_smoke.yaml
+    server_policy_config: pi05_droid
+    checkpoint_dir: gs://openpi-assets/checkpoints/pi05_droid
+
+  - name: base
+    enabled: true
+    smoke_config_path: configs/smoke/openpi_base_bowl_variation_smoke.yaml
+    server_policy_config: pi05_libero
+    checkpoint_dir: gs://openpi-assets/checkpoints/pi05_base

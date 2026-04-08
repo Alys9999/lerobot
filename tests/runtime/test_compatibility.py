@@ -64,7 +64,7 @@ def test_validate_openpi_jax_policy_request_rejects_bad_state_dim():
     request = _make_request()
     request.observation.robot_state["libero_state_8d"] = np.zeros(6, dtype=np.float32)
 
-    with pytest.raises(CompatibilityError, match="Expected 8D LIBERO state"):
+    with pytest.raises(CompatibilityError, match="Expected state dim 8"):
         validate_openpi_jax_policy_request(request, OpenPIJaxLiberoSpec())
 
 

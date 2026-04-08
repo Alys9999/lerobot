@@ -43,7 +43,8 @@ class OpenPIJaxLiberoSpec:
     )
     state_observation_key: str = OBS_STATE
     state_packet_key: str = "libero_state_8d"
-    state_remote_key: str = "observation/state"
+    state_remote_key: str | None = "observation/state"
+    state_remote_keys: dict[str, list[int]] = field(default_factory=dict)
     state_dim: int = 8
     remote_image_container_key: str | None = None
     remote_image_layout: str = "hwc"
@@ -69,6 +70,33 @@ class OpenPIJaxLiberoSpec:
             raise ValueError(f"action_horizon must be positive, got {self.action_horizon}.")
         if self.state_dim <= 0:
             raise ValueError(f"state_dim must be positive, got {self.state_dim}.")
+        if self.state_remote_key is None and not self.state_remote_keys:
+            raise ValueError("Either state_remote_key or state_remote_keys must be configured.")
+        if self.state_remote_keys:
+            seen_state_indices: set[int] = set()
+            for remote_key, indices in self.state_remote_keys.items():
+                if not remote_key:
+                    raise ValueError("state_remote_keys cannot contain an empty remote key.")
+                if not indices:
+                    raise ValueError(f"state_remote_keys[{remote_key!r}] must contain at least one state index.")
+                for raw_index in indices:
+                    index = int(raw_index)
+                    if index < 0 or index >= self.state_dim:
+                        raise ValueError(
+                            "state_remote_keys references an out-of-range state index. "
+                            f"Got index={index} for state_dim={self.state_dim}."
+                        )
+                    if index in seen_state_indices:
+                        raise ValueError(
+                            "state_remote_keys cannot reference the same packet state index more than once. "
+                            f"Got duplicate index={index}."
+                        )
+                    seen_state_indices.add(index)
+            if seen_state_indices != set(range(self.state_dim)):
+                raise ValueError(
+                    "state_remote_keys must cover every packet state index exactly once. "
+                    f"Got indices={sorted(seen_state_indices)} expected={list(range(self.state_dim))}."
+                )
         if self.remote_image_layout not in {"hwc", "chw"}:
             raise ValueError(
                 "remote_image_layout must be either 'hwc' or 'chw'. "

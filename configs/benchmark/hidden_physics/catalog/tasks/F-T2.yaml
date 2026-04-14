@@ -1,0 +1,14 @@
+benchmark_task_id: F-T2
+family: F
+template: T2
+suite_name: libero_object
+base_task_id: 0
+prompt: pick up the alphabet soup and place it in the basket
+variation_profile: friction_diagnostic_v1
+variation_target: alphabet_soup
+success_contract: libero_default_success
+iid_level: iid_high
+ood_level: ood_high
+seed_group: sg1
+tags:
+- diagnostic

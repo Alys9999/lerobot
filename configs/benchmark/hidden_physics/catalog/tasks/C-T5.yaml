@@ -1,0 +1,14 @@
+benchmark_task_id: C-T5
+family: C
+template: T5
+suite_name: libero_90
+base_task_id: 10
+prompt: put the bowl in the bottom drawer
+variation_profile: com_inertia_diagnostic_v1
+variation_target: bowl
+success_contract: libero_default_success
+iid_level: iid_high
+ood_level: ood_high
+seed_group: sg1
+tags:
+- diagnostic

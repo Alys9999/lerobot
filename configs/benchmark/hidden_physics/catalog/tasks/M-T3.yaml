@@ -1,0 +1,14 @@
+benchmark_task_id: M-T3
+family: M
+template: T3
+suite_name: libero_90
+base_task_id: 3
+prompt: put the frying pan on the cabinet shelf
+variation_profile: mass_diagnostic_v1
+variation_target: frying_pan
+success_contract: libero_default_success
+iid_level: iid_high
+ood_level: ood_high
+seed_group: sg1
+tags:
+- diagnostic

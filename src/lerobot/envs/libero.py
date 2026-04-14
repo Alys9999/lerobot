@@ -168,6 +168,10 @@ class LiberoEnv(gym.Env):
         self._variation_profile = None
         self._variation_rng = np.random.default_rng()
         self.last_variation_sample: dict[str, float] = {}
+        # Benchmark metadata injected by upstream runners (e.g. the
+        # hidden-physics benchmark runner) so that every info dict carries
+        # the same (benchmark_task_id, family, template) tags.
+        self._episode_metadata: dict[str, Any] = {}
         default_steps = 500
         self._max_episode_steps = (
             TASK_SUITE_MAX_STEPS.get(task_suite_name, default_steps)
@@ -319,6 +323,20 @@ class LiberoEnv(gym.Env):
         self._variation_profile = None
         self.last_variation_sample = {}
 
+    def set_episode_metadata(self, metadata: dict[str, Any] | None) -> None:
+        """Record benchmark-level episode metadata to surface in every ``info`` dict.
+
+        The hidden-physics benchmark runner calls this before each episode so
+        that downstream trace / result code sees a stable
+        ``{benchmark_task_id, family, template, ...}`` tag set regardless of
+        whether the tags were injected by the env or by a higher layer.
+        Pass ``None`` to clear.
+        """
+        self._episode_metadata = dict(metadata) if metadata else {}
+
+    def clear_episode_metadata(self) -> None:
+        self._episode_metadata = {}
+
     def _apply_variation_if_needed(self) -> None:
         if self._variation_profile is None:
             self.last_variation_sample = {}
@@ -352,6 +370,8 @@ class LiberoEnv(gym.Env):
             raise ValueError(f"Invalid control mode: {self.control_mode}")
         observation = self._format_raw_obs(raw_obs)
         info = {"is_success": False, "variation": dict(self.last_variation_sample)}
+        if self._episode_metadata:
+            info.update(self._episode_metadata)
         return observation, info
 
     def step(self, action: np.ndarray) -> tuple[RobotObservation, float, bool, bool, dict[str, Any]]:
@@ -379,9 +399,11 @@ class LiberoEnv(gym.Env):
                 "variation": dict(self.last_variation_sample),
             }
         )
+        if self._episode_metadata:
+            info.update(self._episode_metadata)
         observation = self._format_raw_obs(raw_obs)
         if episode_done:
-            info["final_info"] = {
+            final_info = {
                 "task": self.task,
                 "task_id": self.task_id,
                 "done": bool(episode_done),
@@ -391,6 +413,9 @@ class LiberoEnv(gym.Env):
                 "is_success": bool(is_success),
                 "variation": dict(self.last_variation_sample),
             }
+            if self._episode_metadata:
+                final_info.update(self._episode_metadata)
+            info["final_info"] = final_info
             if self.autoreset_on_done:
                 self.reset()
         return observation, reward, terminated, truncated, info

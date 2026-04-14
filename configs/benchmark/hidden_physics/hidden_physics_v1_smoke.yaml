@@ -1,0 +1,29 @@
+# Hidden-Physics Diagnostic Benchmark v1 — Smoke test config
+#
+# Runs a minimal subset (one task per family) with few episodes to verify
+# the benchmark pipeline works end-to-end.
+
+benchmark_name: hidden_physics_v1_smoke
+
+# Only run one template per family for quick validation
+families: [F, M, C, P]
+templates: [T1]
+
+# Only test iid_high for smoke (not all 4 levels)
+iid_ood_levels: [iid_high]
+
+runtime:
+  n_episodes_per_task: 2
+  max_steps: 200
+  write_trace: true
+  write_video: false
+  output_dir: outputs/hidden_physics
+  run_name: smoke
+  fail_fast: true
+  seed: 42
+  parallel_tasks: 1
+
+policy:
+  mode: native
+  native_policy_path: ""
+  adapter_endpoint: ""

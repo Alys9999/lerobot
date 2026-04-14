@@ -1,0 +1,15 @@
+benchmark_task_id: R-T4
+family: R
+template: T4
+suite_name: libero_spatial
+base_task_id: 8
+prompt: pick up the black bowl next to the ramekin and place it on the stove
+variation_profile: passive_dynamics_diagnostic_v1
+variation_target: gripper_fingers
+success_contract: libero_default_success
+iid_level: iid_high
+ood_level: ood_high
+seed_group: sg1
+tags:
+- challenge
+- reorientation

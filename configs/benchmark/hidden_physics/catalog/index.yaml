@@ -1,0 +1,28 @@
+catalog_version: v1
+description: "Hidden-Physics Diagnostic Benchmark v1 \u2014 24 tasks (20 diagnostic\
+  \ + 4 challenge)"
+task_files:
+- tasks/F-T1.yaml
+- tasks/F-T2.yaml
+- tasks/F-T3.yaml
+- tasks/F-T4.yaml
+- tasks/F-T5.yaml
+- tasks/M-T1.yaml
+- tasks/M-T2.yaml
+- tasks/M-T3.yaml
+- tasks/M-T4.yaml
+- tasks/M-T5.yaml
+- tasks/C-T1.yaml
+- tasks/C-T2.yaml
+- tasks/C-T3.yaml
+- tasks/C-T4.yaml
+- tasks/C-T5.yaml
+- tasks/P-T1.yaml
+- tasks/P-T2.yaml
+- tasks/P-T3.yaml
+- tasks/P-T4.yaml
+- tasks/P-T5.yaml
+- tasks/R-T1.yaml
+- tasks/R-T2.yaml
+- tasks/R-T3.yaml
+- tasks/R-T4.yaml

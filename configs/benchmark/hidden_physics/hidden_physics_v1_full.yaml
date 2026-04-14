@@ -1,0 +1,29 @@
+# Hidden-Physics Diagnostic Benchmark v1 — Full evaluation config
+#
+# Runs all 24 tasks (20 diagnostic + 4 challenge) with 10 episodes each,
+# at all four perturbation levels (iid_low, iid_high, ood_low, ood_high).
+
+benchmark_name: hidden_physics_v1
+
+# Empty = all families and templates
+families: []
+templates: []
+
+# All perturbation levels (nominal is always run automatically)
+iid_ood_levels: [iid_low, iid_high, ood_low, ood_high]
+
+runtime:
+  n_episodes_per_task: 10
+  max_steps: 400
+  write_trace: true
+  write_video: false
+  output_dir: outputs/hidden_physics
+  run_name: ""
+  fail_fast: false
+  seed: 42
+  parallel_tasks: 1
+
+policy:
+  mode: native
+  native_policy_path: ""
+  adapter_endpoint: ""

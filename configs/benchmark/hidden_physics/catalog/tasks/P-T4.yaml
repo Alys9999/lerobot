@@ -1,0 +1,14 @@
+benchmark_task_id: P-T4
+family: P
+template: T4
+suite_name: libero_90
+base_task_id: 20
+prompt: put the book in the back compartment of the caddy
+variation_profile: passive_dynamics_diagnostic_v1
+variation_target: gripper_fingers
+success_contract: libero_default_success
+iid_level: iid_high
+ood_level: ood_high
+seed_group: sg1
+tags:
+- diagnostic

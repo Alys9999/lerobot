@@ -25,22 +25,55 @@ from .contracts import (
     RuntimeSpec,
     TaskSpec,
 )
+from .hidden_physics_catalog import (
+    BenchmarkTaskDefinition,
+    CatalogValidationError,
+    V1_CATALOG,
+    filter_catalog,
+    load_catalog,
+    validate_catalog,
+)
+from .hidden_physics_config import (
+    HiddenPhysicsBenchmarkConfig,
+    HiddenPhysicsRuntimeConfig,
+    PolicyModeConfig,
+)
+from .hidden_physics_results import (
+    BenchmarkResult,
+    EpisodeResult,
+    FamilyResult,
+    TaskResult,
+)
 from .trace import read_episode_trace_summary, write_episode_trace
-from .variation import VariationConfig, VariationProfile, build_variation_profile
+from .variation import VariationConfig, VariationProfile, build_family_variation_profile, build_variation_profile
 
 __all__ = [
     "ActionCommand",
+    "BenchmarkResult",
+    "BenchmarkTaskDefinition",
+    "CatalogValidationError",
     "CompatibilityError",
+    "EpisodeResult",
     "EpisodeTrace",
+    "FamilyResult",
+    "HiddenPhysicsBenchmarkConfig",
+    "HiddenPhysicsRuntimeConfig",
     "ObservationPacket",
+    "PolicyModeConfig",
     "PolicyRequest",
     "PolicyResponse",
     "RobotSpec",
     "RuntimeSpec",
+    "TaskResult",
     "TaskSpec",
+    "V1_CATALOG",
     "VariationConfig",
     "VariationProfile",
+    "build_family_variation_profile",
     "build_variation_profile",
+    "filter_catalog",
+    "load_catalog",
+    "validate_catalog",
     "read_episode_trace_summary",
     "validate_action_command_for_spec",
     "validate_openpi_jax_policy_request",

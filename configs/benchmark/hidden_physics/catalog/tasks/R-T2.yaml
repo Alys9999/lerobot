@@ -1,0 +1,16 @@
+benchmark_task_id: R-T2
+family: R
+template: T2
+suite_name: libero_spatial
+base_task_id: 5
+prompt: pick up the black bowl between the plate and the ramekin and place it on the
+  plate
+variation_profile: mass_diagnostic_v1
+variation_target: bowl
+success_contract: libero_default_success
+iid_level: iid_high
+ood_level: ood_high
+seed_group: sg1
+tags:
+- challenge
+- extraction

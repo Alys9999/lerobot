@@ -210,6 +210,46 @@ def test_libero_env_variation_hook_applies_before_episode(monkeypatch):
     assert step_info["variation"] == info["variation"]
 
 
+def test_libero_env_set_episode_metadata_surfaces_in_info(monkeypatch):
+    """Plan §8.1: family / template / benchmark_task_id must stably appear
+    in every ``info`` dict once the upstream runner has pushed them via
+    ``set_episode_metadata``.
+    """
+    monkeypatch.setattr(LiberoEnv, "_make_envs_task", _make_fake_env)
+
+    env = LiberoEnv(
+        task_suite=_FakeSuite(),
+        task_id=0,
+        task_suite_name="libero_object",
+        obs_type="pixels_agent_pos",
+        init_states=False,
+        num_steps_wait=0,
+        autoreset_on_done=False,
+    )
+    env.set_episode_metadata(
+        {"benchmark_task_id": "F-T1", "family": "F", "template": "T1"}
+    )
+
+    _obs, info = env.reset(seed=7)
+    assert info["benchmark_task_id"] == "F-T1"
+    assert info["family"] == "F"
+    assert info["template"] == "T1"
+
+    _obs, _reward, _terminated, _truncated, step_info = env.step(
+        np.zeros(7, dtype=np.float32)
+    )
+    assert step_info["benchmark_task_id"] == "F-T1"
+    assert step_info["family"] == "F"
+    assert step_info["template"] == "T1"
+
+    # Clearing metadata removes the tags from subsequent info dicts.
+    env.clear_episode_metadata()
+    _obs, info_cleared = env.reset(seed=7)
+    assert "benchmark_task_id" not in info_cleared
+    assert "family" not in info_cleared
+    assert "template" not in info_cleared
+
+
 def test_libero_env_step_reports_truncation_when_underlying_done_flag_is_set(monkeypatch):
     monkeypatch.setattr(LiberoEnv, "_make_envs_task", _make_fake_truncated_env)
 
